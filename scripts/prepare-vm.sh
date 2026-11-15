@@ -1,0 +1,123 @@
+#!/bin/bash
+#
+# Copyright (C) 2026 by Fabrizio Giudici
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Prepares the BridgeBox VM in $VM_DIR:
+#
+#   1. downloads the Alpine cloud image (cached in $CACHE_DIR), extracts the disk, creates the ssh key and the
+#      cloud-init files;
+#   2. boots the VM and seals the image with scripts/seal.sh, so that from then on the VM runs from a read-only disk
+#      and loses its changes when it stops;
+#   3. boots the sealed VM, to check that it runs from a read-only disk.
+#
+# If a step fails, running it again resumes from that step.
+# The VM is then controlled with bin/BridgeBox.
+#
+set -euo pipefail
+
+# shellcheck source=scripts/config.sh
+source "$(cd "$(dirname "$0")" && pwd)/config.sh"
+
+BRIDGEBOX="$ROOT/bin/BridgeBox"
+
+download_image() {
+    local image="$CACHE_DIR/$ALPINE_IMAGE"
+    local url="$ALPINE_MIRROR/v${ALPINE_VERSION%.*}/releases/cloud/$ALPINE_IMAGE"
+
+    if [ ! -f "$image" ]; then
+        log "Downloading $url"
+        curl -fL --progress-bar -o "$image.part" "$url"
+        mv "$image.part" "$image"
+    fi
+
+    log "Verifying the checksum of $ALPINE_IMAGE"
+    local expected actual
+    expected="$(curl -fsSL "$url.sha512" | awk '{print $1}')"
+    actual="$(shasum -a 512 "$image" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        rm -f "$image"
+        die "checksum mismatch: the download has been deleted, please retry"
+    fi
+}
+
+create_disk() {
+    download_image
+
+    # The archive contains a single file (disk.raw, as Google Cloud requires).
+    log "Extracting the disk image"
+    local work="$VM_DIR/extract" content
+    rm -rf "$work"
+    mkdir -p "$work"
+    tar -xzf "$CACHE_DIR/$ALPINE_IMAGE" -C "$work"
+    content="$(ls -A "$work")"
+    [ "$(echo "$content" | wc -l | tr -d ' ')" = "1" ] && [ -f "$work/$content" ] \
+        || die "unexpected content in $ALPINE_IMAGE: $content"
+
+    if [ ! -f "$SSH_KEY" ]; then
+        log "Creating the ssh key"
+        ssh-keygen -q -t ed25519 -N '' -C bridgebox-dev -f "$SSH_KEY"
+    fi
+
+    log "Creating the cloud-init files"
+    mkdir -p "$CLOUD_INIT_DIR"
+    sed "s|@SSH_PUBLIC_KEY@|$(cat "$SSH_KEY.pub")|" "$ROOT/cloud-init/user-data" > "$CLOUD_INIT_DIR/user-data"
+    cp "$ROOT/cloud-init/meta-data" "$CLOUD_INIT_DIR/meta-data"
+
+    rm -f "$EFI_VARS" "$KNOWN_HOSTS"
+    mv "$work/$content" "$DISK"
+    rm -rf "$work"
+}
+
+# Shuts down the VM from inside, so that the disk is cleanly unmounted; 'BridgeBox stop' then waits for vfkit to exit
+# (and only forces the VM off if it doesn't).
+shutdown_vm() {
+    "$BRIDGEBOX" ssh 'doas poweroff' || true
+    "$BRIDGEBOX" stop
+}
+
+provision() {
+    log "Sealing the image"
+    "$BRIDGEBOX" start
+    "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/seal.sh"
+    shutdown_vm
+    touch "$SEALED"
+}
+
+# Boots the sealed VM: bin/BridgeBox attaches the disk read-only.
+verify() {
+    log "Booting the sealed VM to check it"
+    "$BRIDGEBOX" start
+    "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay"'
+    shutdown_vm
+}
+
+prepare() {
+    need curl shasum tar ssh-keygen
+    check_paths
+    mkdir -p "$CACHE_DIR" "$VM_DIR"
+
+    if [ -f "$PROVISIONED" ]; then
+        log "The VM is already prepared in $VM_DIR: nothing to do ('make clean' to start over)"
+        return
+    fi
+
+    [ -f "$DISK" ] || create_disk
+    [ -f "$SEALED" ] || provision
+    verify
+    touch "$PROVISIONED"
+    log "VM prepared in $VM_DIR"
+}
+
+prepare

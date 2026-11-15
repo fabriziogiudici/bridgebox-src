@@ -1,0 +1,8 @@
+#cloud-config
+#
+# Cloud-init only installs the development ssh key for the image's default user ('alpine').
+# @SSH_PUBLIC_KEY@ is replaced by scripts/prepare-vm.sh.
+#
+ssh_authorized_keys:
+  - @SSH_PUBLIC_KEY@
+ssh_pwauth: false

@@ -1,0 +1,211 @@
+#!/bin/bash
+#
+# Copyright (C) 2026 by Fabrizio Giudici
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Controls the BridgeBox VM with vfkit (Apple Virtualization.framework).
+#
+#   BridgeBox start     starts the VM in background and waits until it's reachable over ssh
+#   BridgeBox stop      stops the VM (Stop, then HardStop if the guest doesn't react)
+#   BridgeBox status    prints the VM state as reported by vfkit
+#   BridgeBox ip        prints the IP address of the VM
+#   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
+#
+# The VM must have been prepared with scripts/prepare-vm.sh ('make image').
+#
+set -euo pipefail
+
+# shellcheck source=scripts/config.sh
+source "$(cd "$(dirname "$0")/.." && pwd)/scripts/config.sh"
+
+# Creates the socket directory, or makes sure that an existing one is a real directory owned by us and private.
+prepare_socket_dir() {
+    if [ ! -e "$SOCKET_DIR" ]; then
+        mkdir -m 700 "$SOCKET_DIR"
+    fi
+    [ -d "$SOCKET_DIR" ] && [ ! -L "$SOCKET_DIR" ] || die "'$SOCKET_DIR' is not a directory"
+    [ "$(stat -f %u "$SOCKET_DIR")" = "$(id -u)" ] || die "'$SOCKET_DIR' is not owned by the current user"
+    chmod 700 "$SOCKET_DIR"
+}
+
+vfkit_pid() {
+    [ -f "$PID_FILE" ] || return 1
+    local pid
+    pid="$(cat "$PID_FILE")"
+    ps -p "$pid" -o comm= 2>/dev/null | grep -q vfkit || return 1
+    echo "$pid"
+}
+
+is_running() { vfkit_pid >/dev/null; }
+
+rest() {
+    local path="$1"
+    shift
+    curl -fsS --unix-socket "$SOCKET" "http://localhost$path" "$@"
+}
+
+# macOS writes MAC addresses in the leases file without leading zeros in each octet (e.g. 2:bb:b0:0:0:1).
+lease_mac() {
+    local IFS=: octet out=""
+    for octet in $MAC; do
+        out="$out:$(printf '%x' "0x$octet")"
+    done
+    echo "${out#:}"
+}
+
+# Prints the IP of the most recent lease for our MAC address, if any.
+# The hw_address field is either "1,<MAC>" (Ethernet) or, when the DHCP client of the guest sends a client identifier
+# made of IAID and DUID as Alpine does, "ff,<client identifier>": that identifier ends with the MAC address.
+find_ip() {
+    [ -r "$LEASES" ] || return 1
+    local mac
+    mac="$(lease_mac)"
+    awk -v mac="$mac" '
+        /^\{/           { ip = ""; hw = ""; lease = "" }
+        /ip_address=/   { sub(/.*ip_address=/, ""); ip = $0 }
+        /hw_address=/   { sub(/.*hw_address=/, ""); hw = $0 }
+        /lease=/        { sub(/.*lease=/, ""); lease = $0 }
+        /^\}/           {
+            suffix = ":" mac
+            if (ip != "" && (hw == "1," mac || substr(hw, length(hw) - length(suffix) + 1) == suffix)) print lease, ip
+        }
+    ' "$LEASES" | while read -r lease ip; do
+        echo "$((lease)) $ip"
+    done | sort -n | tail -1 | awk '{print $2}'
+}
+
+vm_ssh() {
+    local ip
+    ip="$(find_ip)" || true
+    [ -n "$ip" ] || die "can't find the IP address of the VM in $LEASES"
+    ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=5 "$SSH_USER@$ip" "$@"
+}
+
+cmd_start() {
+    need "$VFKIT" curl ssh
+    check_paths
+    [ -f "$DISK" ] || die "the VM has not been prepared: run 'make image' first"
+
+    if is_running; then
+        log "The VM is already running"
+        return
+    fi
+
+    prepare_socket_dir
+
+    # Once the image has been sealed, its disk is attached read-only and cloud-init isn't used anymore; the EFI
+    # variables, which the firmware writes, are created from scratch at each start in the socket directory.
+    local system_disk="virtio-blk,path=$DISK" efi_vars="$EFI_VARS" cloud_init_args=()
+    if [ -f "$SEALED" ]; then
+        system_disk="$system_disk,readonly"
+        efi_vars="$SOCKET_DIR/efi-vars"
+        rm -f "$efi_vars"
+    else
+        cloud_init_args=(--cloud-init "$CLOUD_INIT_DIR/user-data,$CLOUD_INIT_DIR/meta-data")
+    fi
+
+    log "Starting the VM"
+    rm -f "$SOCKET"
+    nohup "$VFKIT" \
+        --cpus "$CPUS" \
+        --memory "$MEMORY_MB" \
+        --bootloader "efi,variable-store=$efi_vars,create" \
+        --device "$system_disk" \
+        --device "virtio-net,nat,mac=$MAC" \
+        --device virtio-rng \
+        --device "virtio-serial,logFilePath=$CONSOLE_LOG" \
+        ${cloud_init_args[@]+"${cloud_init_args[@]}"} \
+        --restful-uri "unix://$SOCKET" \
+        > "$VFKIT_LOG" 2>&1 < /dev/null &
+    echo $! > "$PID_FILE"
+
+    local deadline=$((SECONDS + BOOT_TIMEOUT)) ip=""
+
+    log "Waiting for the VM to get an IP address (timeout ${BOOT_TIMEOUT}s)"
+    until [ -n "$ip" ]; do
+        is_running || die "vfkit exited unexpectedly, see $VFKIT_LOG"
+        [ $SECONDS -lt $deadline ] || die "the VM didn't get an IP address, see $CONSOLE_LOG and $VFKIT_LOG"
+        sleep 2
+        ip="$(find_ip)" || true
+    done
+
+    log "Waiting for ssh on $ip"
+    until vm_ssh -o BatchMode=yes true 2>/dev/null; do
+        is_running || die "vfkit exited unexpectedly, see $VFKIT_LOG"
+        [ $SECONDS -lt $deadline ] || die "the VM is not reachable over ssh, see $CONSOLE_LOG and $VFKIT_LOG"
+        sleep 2
+    done
+
+    log "The VM is running at $ip ('BridgeBox ssh' to log in)"
+}
+
+# Waits up to $1 seconds for vfkit to exit; returns 1 on timeout.
+wait_for_exit() {
+    local deadline=$((SECONDS + $1))
+    while is_running; do
+        [ $SECONDS -lt $deadline ] || return 1
+        sleep 1
+    done
+}
+
+cmd_stop() {
+    local pid
+    if ! pid="$(vfkit_pid)"; then
+        log "The VM is not running"
+        rm -f "$PID_FILE" "$SOCKET"
+        return
+    fi
+
+    log "Stopping the VM (timeout ${STOP_TIMEOUT}s)"
+    rest /vm/state -X POST -d '{"state": "Stop"}' >/dev/null || warn "the Stop request failed"
+
+    if ! wait_for_exit "$STOP_TIMEOUT"; then
+        warn "the guest didn't shut down, forcing it off (HardStop)"
+        rest /vm/state -X POST -d '{"state": "HardStop"}' >/dev/null || warn "the HardStop request failed"
+        if ! wait_for_exit 10; then
+            warn "vfkit is still running, terminating it"
+            kill "$pid" 2>/dev/null || true
+            wait_for_exit 10 || kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
+
+    rm -f "$PID_FILE" "$SOCKET"
+    log "The VM is stopped"
+}
+
+cmd_status() {
+    if is_running; then
+        rest /vm/state
+        echo
+    else
+        echo "not running"
+    fi
+}
+
+cmd_ip() {
+    local ip
+    ip="$(find_ip)" || true
+    [ -n "$ip" ] || die "can't find the IP address of the VM in $LEASES"
+    echo "$ip"
+}
+
+case "${1:-}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    status)  cmd_status ;;
+    ip)      cmd_ip ;;
+    ssh)     shift; vm_ssh "$@" ;;
+    *)       echo "Usage: $(basename "$0") {start | stop | status | ip | ssh [command...]}" >&2; exit 1 ;;
+esac
