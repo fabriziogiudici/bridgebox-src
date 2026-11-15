@@ -92,10 +92,21 @@ lease_mac() {
     echo "${out#:}"
 }
 
+# Prints the IP address of the VM, if found. Once the image has been sealed, the VM announces itself with Bonjour, which
+# only answers while the VM is running; before (that is, during the provisioning by scripts/prepare-vm.sh) the DHCP
+# lease of the VM is used, which can be left over from a previous run.
+find_ip() {
+    if [ -f "$SEALED" ]; then
+        dscacheutil -q host -a name "$MDNS_NAME" | awk '/^ip_address:/ { print $2; exit }'
+    else
+        find_ip_in_leases
+    fi
+}
+
 # Prints the IP of the most recent lease for our MAC address, if any.
 # The hw_address field is either "1,<MAC>" (Ethernet) or, when the DHCP client of the guest sends a client identifier
 # made of IAID and DUID as Alpine does, "ff,<client identifier>": that identifier ends with the MAC address.
-find_ip() {
+find_ip_in_leases() {
     [ -r "$LEASES" ] || return 1
     local mac
     mac="$(lease_mac)"
@@ -116,13 +127,13 @@ find_ip() {
 vm_ssh() {
     local ip
     ip="$(find_ip)" || true
-    [ -n "$ip" ] || die "can't find the IP address of the VM in $LEASES"
+    [ -n "$ip" ] || die "can't find the IP address of the VM: is it running?"
     ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout=5 "$SSH_USER@$ip" "$@"
 }
 
 cmd_start() {
-    need "$VFKIT" curl ssh diskutil plutil sudo
+    need "$VFKIT" curl ssh diskutil plutil sudo dscacheutil
     check_paths
     [ -f "$DISK" ] || die "the VM has not been prepared: run 'make image' first"
 
@@ -257,7 +268,7 @@ cmd_status() {
 cmd_ip() {
     local ip
     ip="$(find_ip)" || true
-    [ -n "$ip" ] || die "can't find the IP address of the VM in $LEASES"
+    [ -n "$ip" ] || die "can't find the IP address of the VM: is it running?"
     echo "$ip"
 }
 

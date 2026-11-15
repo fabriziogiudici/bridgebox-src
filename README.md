@@ -30,9 +30,9 @@ make clean    # stops and deletes the VM (the Alpine image is kept; 'make distcl
 ```
 
 `make image` runs `scripts/prepare-vm.sh`, which boots the VM once to install `btrfs-progs`, `zfs` and `zfs-virt`
-(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images) with `scripts/provision.sh`, and seals the
-image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs from a read-only disk and that the
-kernel modules load. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
+(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images) and Avahi, with `scripts/provision.sh`, and
+seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs from a read-only disk, that
+the kernel modules load and that the Mac can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
 (`bin/BridgeBox start [disk...] | stop | status | ip | ssh [command...]`). Settings shared by the two scripts are in
 `scripts/config.sh`.
 
@@ -45,7 +45,9 @@ stops. cloud-init is disabled in the sealed image, and the EFI variables are cre
 `/tmp/bridgebox-<uid>/`.
 
 The VM uses the NAT network of Virtualization.framework: it gets an address reachable from the Mac but not from the
-local network. The address is found in `/var/db/dhcpd_leases` by the fixed MAC address of the VM.
+local network. Once sealed, the VM announces itself with Bonjour as `bridgebox.local` (IPv4 only), which is how
+`bin/BridgeBox` finds its address; while `make image` provisions the VM, before Avahi is installed, the address is
+taken from `/var/db/dhcpd_leases`, by the fixed MAC address of the VM.
 
 Mounting is done inside the VM by a back-end, `vm/bridgebox-backend.py` (installed in the image as
 `/usr/local/sbin/bridgebox-backend`), which `bin/BridgeBox` runs over ssh. When partitions are passed to `start`, it

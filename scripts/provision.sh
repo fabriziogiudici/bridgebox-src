@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Runs as root inside the VM (sent by scripts/prepare-vm.sh) and installs the btrfs and ZFS software.
-# It can be run more than once.
+# Runs as root inside the VM (sent by scripts/prepare-vm.sh): installs the btrfs and ZFS software, and Avahi to
+# announce the VM with Bonjour. It can be run more than once.
 #
 set -eu
 
@@ -37,5 +37,20 @@ apk add lsblk
 # dependency is made explicit.
 echo "==> Installing Python"
 apk add python3
+
+# Avahi announces the host name of the VM (set by cloud-init) as <name>.local, so the Mac can find the VM by name
+# instead of looking for its DHCP lease. Only IPv4 is published: an IPv6 link-local address would be less practical
+# for ssh and SMB. The announcements stay on the NAT network of the VM, which isn't bridged to the local network.
+echo "==> Installing Avahi"
+apk add avahi dbus
+conf=/etc/avahi/avahi-daemon.conf
+sed -i -e 's/^#*use-ipv6=.*/use-ipv6=no/' -e 's/^#*publish-aaaa-on-ipv4=.*/publish-aaaa-on-ipv4=no/' "$conf"
+if ! grep -q '^use-ipv6=no$' "$conf" || ! grep -q '^publish-aaaa-on-ipv4=no$' "$conf"; then
+    echo "ERROR: unexpected format of $conf" >&2
+    exit 1
+fi
+for service in dbus avahi-daemon; do
+    [ -e "/etc/runlevels/default/$service" ] || rc-update add "$service" default
+done
 
 sync

@@ -30,6 +30,7 @@ ALPINE_IMAGE="${ALPINE_IMAGE:-alpine-${ALPINE_VERSION}-aarch64-cloudinit-r0.raw.
 CPUS="${CPUS:-2}"
 MEMORY_MB="${MEMORY_MB:-1024}"
 MAC="${MAC:-02:bb:b0:00:00:01}"     # fixed, locally administered: used to find the VM in the DHCP leases
+MDNS_NAME="${MDNS_NAME:-bridgebox.local}"   # announced by the VM with Bonjour (the host name comes from cloud-init)
 CACHE_DIR="${CACHE_DIR:-$ROOT/cache}"
 VM_DIR="${VM_DIR:-$ROOT/target/vm}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-120}"
