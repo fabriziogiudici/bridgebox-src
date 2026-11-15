@@ -33,4 +33,9 @@ apk add btrfs-progs zfs zfs-virt
 echo "==> Installing lsblk"
 apk add lsblk
 
+# The back-end (installed by scripts/prepare-vm.sh) is written in Python. cloud-init already needs it, but the
+# dependency is made explicit.
+echo "==> Installing Python"
+apk add python3
+
 sync

@@ -16,8 +16,12 @@
 #
 # Controls the BridgeBox VM with vfkit (Apple Virtualization.framework).
 #
-#   BridgeBox start     starts the VM in background and waits until it's reachable over ssh
-#   BridgeBox stop      stops the VM (Stop, then HardStop if the guest doesn't react)
+#   BridgeBox start [disk...]
+#                       starts the VM in background, with the given partitions (e.g. disk10s2, as shown by 'diskutil
+#                       list' or scripts/detect-partitions.sh) as additional disks, and waits until it's reachable over
+#                       ssh; if partitions were given, mounts the ZFS pools and btrfs filesystems found on them under
+#                       /srv/bridgebox
+#   BridgeBox stop      unmounts the disks and stops the VM (Stop, then HardStop if the guest doesn't react)
 #   BridgeBox status    prints the VM state as reported by vfkit
 #   BridgeBox ip        prints the IP address of the VM
 #   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
@@ -37,6 +41,30 @@ prepare_socket_dir() {
     [ -d "$SOCKET_DIR" ] && [ ! -L "$SOCKET_DIR" ] || die "'$SOCKET_DIR' is not a directory"
     [ "$(stat -f %u "$SOCKET_DIR")" = "$(id -u)" ] || die "'$SOCKET_DIR' is not owned by the current user"
     chmod 700 "$SOCKET_DIR"
+}
+
+# Checks a partition to pass to the VM and makes it accessible to vfkit, which runs as the current user: macOS lets only
+# root open a disk, so the device node is given to the user with sudo. The ownership lasts until the disk is disconnected, since
+# macOS creates the device node again when the disk is connected.
+# The block device (/dev/diskN) is used, not the raw one (/dev/rdiskN): vfkit reads the first 4 bytes of each disk to
+# reject qcow2 images, and the raw device only accepts reads aligned to the sector size.
+prepare_data_disk() {
+    local disk="$1" dev plist mount
+    echo "$disk" | grep -Eq '^disk[0-9]+(s[0-9]+)?$' \
+        || die "'$disk' is not a disk identifier such as disk10s2 (see 'diskutil list')"
+    dev="/dev/$disk"
+    [ -e "$dev" ] || die "the partition $dev doesn't exist: is the disk connected? (see 'diskutil list')"
+
+    plist="$(mktemp)"
+    diskutil info -plist "$disk" > "$plist"
+    mount="$(plutil -extract MountPoint raw -o - "$plist" 2>/dev/null || true)"
+    rm -f "$plist"
+    [ -z "$mount" ] || die "$disk is mounted by macOS on '$mount': unmount it first ('diskutil unmount $disk')"
+
+    if [ ! -r "$dev" ] || [ ! -w "$dev" ]; then
+        log "Giving $(id -un) access to $dev (sudo may ask for your password)"
+        sudo chown "$(id -un)" "$dev"
+    fi
 }
 
 vfkit_pid() {
@@ -94,14 +122,21 @@ vm_ssh() {
 }
 
 cmd_start() {
-    need "$VFKIT" curl ssh
+    need "$VFKIT" curl ssh diskutil plutil sudo
     check_paths
     [ -f "$DISK" ] || die "the VM has not been prepared: run 'make image' first"
 
     if is_running; then
         log "The VM is already running"
+        [ $# -eq 0 ] || warn "disks can't be added to a running VM: stop it first"
         return
     fi
+
+    local disk disk_args=()
+    for disk in "$@"; do
+        prepare_data_disk "$disk"
+        disk_args+=(--device "virtio-blk,path=/dev/$disk,type=dev")
+    done
 
     prepare_socket_dir
 
@@ -123,6 +158,7 @@ cmd_start() {
         --memory "$MEMORY_MB" \
         --bootloader "efi,variable-store=$efi_vars,create" \
         --device "$system_disk" \
+        ${disk_args[@]+"${disk_args[@]}"} \
         --device "virtio-net,nat,mac=$MAC" \
         --device virtio-rng \
         --device "virtio-serial,logFilePath=$CONSOLE_LOG" \
@@ -149,6 +185,12 @@ cmd_start() {
     done
 
     log "The VM is running at $ip ('BridgeBox ssh' to log in)"
+
+    # The back-end in the VM mounts the ZFS pools and the btrfs filesystems found on the disks under /srv/bridgebox,
+    # asking for the passphrases of the encrypted pools: ssh allocates a terminal (-t) for that.
+    if [ $# -gt 0 ]; then
+        vm_ssh -t doas "$BACKEND" mount || warn "not all the filesystems on the disks could be mounted"
+    fi
 }
 
 # Waits up to $1 seconds for vfkit to exit; returns 1 on timeout.
@@ -166,6 +208,24 @@ cmd_stop() {
         log "The VM is not running"
         rm -f "$PID_FILE" "$SOCKET"
         return
+    fi
+
+    # Before powering off, the back-end unmounts the btrfs filesystems and exports the ZFS pools. If that fails, for
+    # instance because a file on the disks is still open, the VM is left running; if the VM can't be reached (ssh exits
+    # with 255), it's stopped anyway.
+    if [ -f "$SEALED" ]; then
+        local ip status=0
+        ip="$(find_ip)" || true
+        if [ -z "$ip" ]; then
+            warn "can't find the VM to unmount the disks"
+        else
+            vm_ssh doas "$BACKEND" unmount || status=$?
+            if [ "$status" -eq 255 ]; then
+                warn "can't reach the VM to unmount the disks"
+            elif [ "$status" -ne 0 ]; then
+                die "the disks can't be unmounted (is a file on them still open?): the VM is still running"
+            fi
+        fi
     fi
 
     log "Stopping the VM (timeout ${STOP_TIMEOUT}s)"
@@ -202,10 +262,10 @@ cmd_ip() {
 }
 
 case "${1:-}" in
-    start)   cmd_start ;;
+    start)   shift; cmd_start "$@" ;;
     stop)    cmd_stop ;;
     status)  cmd_status ;;
     ip)      cmd_ip ;;
     ssh)     shift; vm_ssh "$@" ;;
-    *)       echo "Usage: $(basename "$0") {start | stop | status | ip | ssh [command...]}" >&2; exit 1 ;;
+    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | ssh [command...]}" >&2; exit 1 ;;
 esac

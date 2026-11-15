@@ -19,8 +19,8 @@
 #   1. downloads the Alpine cloud image (cached in $CACHE_DIR), extracts the disk, creates the ssh key and the
 #      cloud-init files;
 #   2. boots the VM and installs the btrfs and ZFS software with scripts/provision.sh (internet access is needed);
-#      then seals the image with scripts/seal.sh, so that from then on the VM runs from a read-only disk and loses its
-#      changes when it stops;
+#      installs the back-end (vm/bridgebox-backend.py), which mounts the disks for bin/BridgeBox; then seals the image
+#      with scripts/seal.sh, so that from then on the VM runs from a read-only disk and loses its changes when it stops;
 #   3. boots the sealed VM, to check that it runs from a read-only disk and that the ZFS and btrfs kernel modules load
 #      with the upgraded kernel.
 #
@@ -82,10 +82,14 @@ create_disk() {
     rm -rf "$work"
 }
 
-# Shuts down the VM from inside, so that the disk is cleanly unmounted; 'BridgeBox stop' then waits for vfkit to exit
-# (and only forces the VM off if it doesn't).
+# Shuts down the VM from inside, so that the disk is cleanly unmounted, and waits for vfkit to exit; 'BridgeBox stop'
+# then only cleans up (or forces the VM off, if it didn't stop). There are no disks to unmount here.
 shutdown_vm() {
     "$BRIDGEBOX" ssh 'doas poweroff' || true
+    local deadline=$((SECONDS + STOP_TIMEOUT))
+    while [ "$("$BRIDGEBOX" status)" != "not running" ] && [ $SECONDS -lt $deadline ]; do
+        sleep 1
+    done
     "$BRIDGEBOX" stop
 }
 
@@ -93,6 +97,9 @@ provision() {
     log "Installing the btrfs and ZFS software"
     "$BRIDGEBOX" start
     "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/provision.sh"
+    log "Installing the back-end as $BACKEND"
+    "$BRIDGEBOX" ssh "doas sh -c 'mkdir -p $(dirname "$BACKEND") && cat > $BACKEND && chmod 755 $BACKEND'" \
+        < "$ROOT/vm/bridgebox-backend.py"
     "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/seal.sh"
     shutdown_vm
     touch "$SEALED"
@@ -104,6 +111,7 @@ verify() {
     "$BRIDGEBOX" start
     "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay" \
         && uname -r && doas modprobe zfs && doas modprobe btrfs && doas zfs version && btrfs --version'
+    "$BRIDGEBOX" ssh "doas $BACKEND unmount && echo 'the back-end runs'"
     shutdown_vm
 }
 

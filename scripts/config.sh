@@ -42,6 +42,7 @@ EFI_VARS="$VM_DIR/efi-vars"
 SSH_KEY="$VM_DIR/id_ed25519"
 KNOWN_HOSTS="$VM_DIR/known_hosts"
 CLOUD_INIT_DIR="$VM_DIR/cloud-init"
+BACKEND=/usr/local/sbin/bridgebox-backend   # inside the VM: installed from vm/bridgebox-backend.py
 # The REST socket can't live in VM_DIR: macOS limits Unix socket paths to 104 bytes, which a deep checkout exceeds.
 # /tmp is shared among users, so the directory is private and checked before use (see prepare_socket_dir).
 SOCKET_DIR="/tmp/bridgebox-$(id -u)"

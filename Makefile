@@ -28,8 +28,11 @@ BRIDGEBOX := bin/BridgeBox
 image:
 	$(PREPARE)
 
+# Partitions to pass to the VM, e.g. make start DISKS="disk10s2 disk8s2"
+DISKS ?=
+
 start: image
-	$(BRIDGEBOX) start
+	$(BRIDGEBOX) start $(DISKS)
 
 stop:
 	$(BRIDGEBOX) stop
