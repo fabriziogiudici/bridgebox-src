@@ -18,7 +18,7 @@ vfkit requires, so no conversion tool is needed.
 ## Development VM
 
 ```shell
-make image    # downloads Alpine 3.24.4 (cached in cache/) and prepares the VM in target/vm
+make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
 make start    # starts the VM in background and waits for ssh
 make ssh      # logs in as the 'alpine' user
 make status   # VM state as reported by vfkit
@@ -28,8 +28,10 @@ make stop     # stops the VM: Stop request first, HardStop if the guest doesn't 
 make clean    # stops and deletes the VM (the Alpine image is kept; 'make distclean' deletes it too)
 ```
 
-`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to seal the image with `scripts/seal.sh`; then it
-boots the sealed VM to check that it runs from a read-only disk. If a step fails, `make image` resumes from it. The other targets run `bin/BridgeBox`, which can also be invoked directly
+`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to install `btrfs-progs`, `zfs` and `zfs-virt`
+(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images) with `scripts/provision.sh`, and seals the
+image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs from a read-only disk and that the
+kernel modules load. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
 (`bin/BridgeBox start | stop | status | ip | ssh [command...]`). Settings shared by the two scripts are in
 `scripts/config.sh`.
 

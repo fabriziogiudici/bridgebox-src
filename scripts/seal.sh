@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Runs as root inside the VM (sent by scripts/prepare-vm.sh) and seals the image: from the
+# Runs as root inside the VM (sent by scripts/prepare-vm.sh) after scripts/provision.sh, and seals the image: from the
 # next boot on, the disk is attached read-only and the root filesystem is an overlay with a tmpfs on top (the
 # 'overlaytmpfs' option of the Alpine initramfs), so everything written while the VM runs is lost when it stops.
 #

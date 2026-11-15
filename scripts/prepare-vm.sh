@@ -18,11 +18,13 @@
 #
 #   1. downloads the Alpine cloud image (cached in $CACHE_DIR), extracts the disk, creates the ssh key and the
 #      cloud-init files;
-#   2. boots the VM and seals the image with scripts/seal.sh, so that from then on the VM runs from a read-only disk
-#      and loses its changes when it stops;
-#   3. boots the sealed VM, to check that it runs from a read-only disk.
+#   2. boots the VM and installs the btrfs and ZFS software with scripts/provision.sh (internet access is needed);
+#      then seals the image with scripts/seal.sh, so that from then on the VM runs from a read-only disk and loses its
+#      changes when it stops;
+#   3. boots the sealed VM, to check that it runs from a read-only disk and that the ZFS and btrfs kernel modules load
+#      with the upgraded kernel.
 #
-# If a step fails, running it again resumes from that step.
+# If a step fails, running it again resumes from that step (provisioning is idempotent).
 # The VM is then controlled with bin/BridgeBox.
 #
 set -euo pipefail
@@ -88,8 +90,9 @@ shutdown_vm() {
 }
 
 provision() {
-    log "Sealing the image"
+    log "Installing the btrfs and ZFS software"
     "$BRIDGEBOX" start
+    "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/provision.sh"
     "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/seal.sh"
     shutdown_vm
     touch "$SEALED"
@@ -99,7 +102,8 @@ provision() {
 verify() {
     log "Booting the sealed VM to check it"
     "$BRIDGEBOX" start
-    "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay"'
+    "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay" \
+        && uname -r && doas modprobe zfs && doas modprobe btrfs && doas zfs version && btrfs --version'
     shutdown_vm
 }
 
