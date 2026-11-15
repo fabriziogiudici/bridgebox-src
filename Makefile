@@ -19,10 +19,13 @@ MEMORY_MB ?= 1024
 MAC ?= 02:bb:b0:00:00:01
 export ALPINE_VERSION CPUS MEMORY_MB MAC VFKIT
 
+# Version of the installer package.
+VERSION ?= 1.0
+
 PREPARE := scripts/prepare-vm.sh
 BRIDGEBOX := bin/BridgeBox
 
-.PHONY: image start stop status ip ssh console clean distclean
+.PHONY: image start stop status ip ssh console pkg clean distclean
 
 # Downloads the Alpine cloud image (cached in cache/) and prepares the VM in target/vm.
 image:
@@ -45,6 +48,11 @@ ip:
 
 ssh:
 	$(BRIDGEBOX) ssh
+
+# Builds the installer package target/BridgeBox-$(VERSION).pkg from the prepared VM; vfkit is included in the package,
+# taken from VFKIT (or PATH).
+pkg: image
+	VERSION="$(VERSION)" scripts/build-pkg.sh
 
 # Follows the serial console of the VM.
 console:

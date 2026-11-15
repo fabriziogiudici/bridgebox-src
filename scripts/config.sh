@@ -36,21 +36,25 @@ VM_DIR="${VM_DIR:-$ROOT/target/vm}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-120}"
 STOP_TIMEOUT="${STOP_TIMEOUT:-30}"
 
+# Files written while the VM runs (process id, logs, ssh known hosts): in the VM directory when running from the
+# project; in a private temporary directory when installed (see scripts/build-pkg.sh), since the VM is read-only.
+RUN_DIR="${RUN_DIR:-$VM_DIR}"
+
 SSH_USER=alpine                      # the default user of the Alpine cloud images
 VFKIT="${VFKIT:-vfkit}"
 DISK="$VM_DIR/disk.raw"
 EFI_VARS="$VM_DIR/efi-vars"
 SSH_KEY="$VM_DIR/id_ed25519"
-KNOWN_HOSTS="$VM_DIR/known_hosts"
+KNOWN_HOSTS="$RUN_DIR/known_hosts"
 CLOUD_INIT_DIR="$VM_DIR/cloud-init"
 BACKEND=/usr/local/sbin/bridgebox-backend   # inside the VM: installed from vm/bridgebox-backend.py
 # The REST socket can't live in VM_DIR: macOS limits Unix socket paths to 104 bytes, which a deep checkout exceeds.
 # /tmp is shared among users, so the directory is private and checked before use (see prepare_socket_dir).
 SOCKET_DIR="/tmp/bridgebox-$(id -u)"
 SOCKET="$SOCKET_DIR/vfkit.sock"
-PID_FILE="$VM_DIR/vfkit.pid"
-VFKIT_LOG="$VM_DIR/vfkit.log"
-CONSOLE_LOG="$VM_DIR/console.log"
+PID_FILE="$RUN_DIR/vfkit.pid"
+VFKIT_LOG="$RUN_DIR/vfkit.log"
+CONSOLE_LOG="$RUN_DIR/console.log"
 SEALED="$VM_DIR/sealed"             # written by scripts/prepare-vm.sh when the image has been sealed
 PROVISIONED="$VM_DIR/provisioned"   # written by scripts/prepare-vm.sh when the VM has been fully prepared
 LEASES="${LEASES:-/var/db/dhcpd_leases}"

@@ -25,6 +25,7 @@
 #   BridgeBox status    prints the VM state as reported by vfkit
 #   BridgeBox ip        prints the IP address of the VM
 #   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
+#   BridgeBox uninstall removes BridgeBox, when installed by the package (with sudo)
 #
 # The VM must have been prepared with scripts/prepare-vm.sh ('make image').
 #
@@ -272,11 +273,27 @@ cmd_ip() {
     echo "$ip"
 }
 
+# Removes what the package installed. Files written by the VM are only in the temporary directory, which is removed too.
+cmd_uninstall() {
+    [ "${INSTALLED:-no}" = "yes" ] || die "uninstall is available only when BridgeBox has been installed by the package"
+    [ "$(id -u)" = "0" ] || die "run it with sudo: sudo BridgeBox uninstall"
+    if pgrep -f "$VFKIT" > /dev/null; then
+        die "the VM is running: stop it first with 'BridgeBox stop' (without sudo)"
+    fi
+
+    log "Removing BridgeBox"
+    rm -rf "$VM_DIR" "$INSTALLED_COMMAND" "/tmp/bridgebox-${SUDO_UID:-$(id -u)}"
+    pkgutil --forget "$PKG_IDENTIFIER" > /dev/null 2>&1 || true
+    log "BridgeBox has been uninstalled"
+}
+
 case "${1:-}" in
     start)   shift; cmd_start "$@" ;;
     stop)    cmd_stop ;;
     status)  cmd_status ;;
     ip)      cmd_ip ;;
     ssh)     shift; vm_ssh "$@" ;;
-    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | ssh [command...]}" >&2; exit 1 ;;
+    uninstall) cmd_uninstall ;;
+    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | ssh [command...] | uninstall}" >&2
+             exit 1 ;;
 esac

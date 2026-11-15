@@ -88,6 +88,26 @@ The REST API socket of vfkit is `/tmp/bridgebox-<uid>/vfkit.sock`, outside `targ
 of Unix socket paths.
 
 
+## Installer package
+
+```shell
+make pkg                     # or: make pkg VFKIT=$HOME/bin/vfkit VERSION=0.2
+```
+
+builds `target/BridgeBox-<version>.pkg` from the prepared VM (`make image` is run first, if needed). The package
+installs:
+
+- `/usr/local/bin/BridgeBox`, the command, with the settings of `scripts/config.sh` included;
+- `/usr/local/share/bridgebox/`, owned by root: the sealed VM disk with its ssh key, and vfkit.
+
+Nothing is started at installation. Once installed, BridgeBox is used with `BridgeBox start [disk...]`,
+`BridgeBox stop` and the other commands; the files written while the VM runs (process id, logs, ssh known hosts, EFI
+variables) are in `/tmp/bridgebox-<uid>/`. `sudo BridgeBox uninstall` removes everything (the VM must be stopped).
+
+The package isn't signed: open it with right click > Open, or install it with
+`sudo installer -pkg target/BridgeBox-<version>.pkg -target /`.
+
+
 ## License
 
 BridgeBox is licensed under the Apache License, Version 2.0: see [LICENSE.md](LICENSE.md).
