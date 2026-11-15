@@ -19,25 +19,31 @@ ssh by the BridgeBox command on the Mac.
 
     bridgebox-backend mount      imports all the ZFS pools found on the disks under /srv/bridgebox, asks for the
                                  passphrases of the encrypted ones and mounts their datasets; mounts the btrfs
-                                 filesystems under /srv/bridgebox too
-    bridgebox-backend unmount    unmounts the btrfs filesystems and exports the ZFS pools (which unmounts them and
-                                 unloads their keys)
+                                 filesystems under /srv/bridgebox too; shares each pool and each btrfs filesystem
+                                 with Samba
+    bridgebox-backend unmount    stops sharing, unmounts the btrfs filesystems and exports the ZFS pools (which
+                                 unmounts them and unloads their keys)
+
+Each pool and each btrfs filesystem has its own share, so that the Mac sees its free space: macOS asks for the free
+space of the whole share, and /srv/bridgebox itself is in the RAM of the VM.
 
 Pools are imported with -f, since the disks are attached to this VM only: they often were last used by another system
 (a different host id), and couldn't be imported otherwise.
 
 A btrfs filesystem is mounted on /srv/bridgebox/<label>, or /srv/bridgebox/<uuid> when it has no label, or the label
-isn't usable as a directory name, or another pool or filesystem has the same name. Its top-level subvolume
-(subvolid=5) is mounted, so that all the subvolumes are visible as directories; besides that, the default options of
-the kernel are used. A filesystem with missing devices isn't mounted.
+isn't usable as a share name, or another pool or filesystem has the same name. Its top-level subvolume (subvolid=5) is
+mounted, so that all the subvolumes are visible as directories; besides that, the default options of the kernel are
+used. A filesystem with missing devices isn't mounted.
 """
 
 import os
 import re
+import socket
 import subprocess
 import sys
 
 MOUNT_ROOT = "/srv/bridgebox"
+SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 PASSPHRASE_ATTEMPTS = 3
 
 
@@ -140,8 +146,8 @@ def btrfs_mounts():
             if fstype == "btrfs" and os.path.dirname(point) == MOUNT_ROOT]
 
 
-# A label is used as the name of the mount point only if it's a plain directory name, not hidden.
-DIRECTORY_NAME = re.compile(r"^[^./][^/]*$")
+# Characters that Samba doesn't accept in a share name, besides the ones that can't be in a directory name.
+SHARE_NAME = re.compile(r"^[^.\s\\/\[\]\":;|<>+=,*?%][^\\/\[\]\":;|<>+=,*?%]{0,79}$")
 
 
 def mount_btrfs(taken):
@@ -166,7 +172,7 @@ def mount_btrfs(taken):
             failures += 1
             continue
         label = fs["label"]
-        usable = (label and DIRECTORY_NAME.match(label) and label.lower() not in taken
+        usable = (label and SHARE_NAME.match(label) and label.lower() not in taken
                   and labels.count(label.lower()) == 1 and not os.path.lexists(os.path.join(MOUNT_ROOT, label)))
         name = label if usable else fs["uuid"]
         point = os.path.join(MOUNT_ROOT, name)
@@ -190,11 +196,40 @@ def unmount_btrfs():
         log(f"Unmounting the btrfs filesystem on {point}")
         result = subprocess.run(["umount", point], capture_output=True, text=True)
         if result.returncode != 0:
-            warn(f"can't unmount {point}: {(result.stderr or result.stdout).strip()}")
+            warn(f"can't unmount {point} (is it still connected from the Mac? Eject it in the Finder): "
+                 f"{(result.stderr or result.stdout).strip()}")
             failures += 1
             continue
         os.rmdir(point)
     return failures
+
+
+def update_shares(excluded=()):
+    """Writes a Samba share for each imported pool whose root dataset is mounted (otherwise the share would be in the
+    RAM of the VM) and for each btrfs filesystem mounted under MOUNT_ROOT, except the excluded ones, and has Samba
+    reload its configuration. Returns the names of the shares."""
+    lines, shared = ["# Written by bridgebox-backend: one share for each mounted volume.", ""], []
+    for pool in imported_pools():
+        if pool in excluded:
+            continue
+        root = next((d for d in datasets(pool, "mountpoint", "mounted") if d["name"] == pool), None)
+        if root is None or root["mounted"] != "yes":
+            warn(f"{pool} isn't shared, since its root dataset isn't mounted")
+            continue
+        lines += [f"[{pool}]", f"   path = {root['mountpoint']}", ""]
+        shared.append(pool)
+    for point in btrfs_mounts():
+        name = os.path.basename(point)
+        if name in excluded:
+            continue
+        lines += [f"[{name}]", f"   path = {point}", ""]
+        shared.append(name)
+    with open(SHARES_CONF, "w") as file:
+        file.write("\n".join(lines))
+    result = subprocess.run(["smbcontrol", "smbd", "reload-config"], capture_output=True, text=True)
+    if result.returncode != 0:
+        warn(f"Samba didn't reload its configuration: {(result.stderr or result.stdout).strip()}")
+    return shared
 
 
 def mount():
@@ -216,17 +251,26 @@ def mount():
         load_keys(name)
         mount_datasets(name)
     failures += mount_btrfs(pools)
+    for name in update_shares():
+        log(f"Shared {name} as smb://{socket.gethostname()}.local/{name}")
     return 1 if failures else 0
 
 
 def unmount():
+    # The shares are removed first, so that no new connections use the disks; those of the filesystems that can't be
+    # unmounted are written again at the end.
+    pools = imported_pools()
+    update_shares(excluded=pools + [os.path.basename(point) for point in btrfs_mounts()])
     failures = unmount_btrfs()
-    for name in imported_pools():
+    for name in pools:
         log(f"Exporting the ZFS pool {name}")
         result = subprocess.run(["zpool", "export", name], capture_output=True, text=True)
         if result.returncode != 0:
-            warn(f"can't export {name}: {result.stderr.strip()}")
+            warn(f"can't export {name} (is it still connected from the Mac? Eject it in the Finder): "
+                 f"{result.stderr.strip()}")
             failures += 1
+    if failures:
+        update_shares()
     return 1 if failures else 0
 
 

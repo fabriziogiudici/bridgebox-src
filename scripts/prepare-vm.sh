@@ -18,12 +18,12 @@
 #
 #   1. downloads the Alpine cloud image (cached in $CACHE_DIR), extracts the disk, creates the ssh key and the
 #      cloud-init files;
-#   2. boots the VM and, with scripts/provision.sh, installs the btrfs and ZFS software and Avahi, which announces the
-#      VM with Bonjour (internet access is needed); installs the back-end (vm/bridgebox-backend.py), which mounts the
-#      disks for bin/BridgeBox; then seals the image with scripts/seal.sh, so that from then on the VM runs from a
-#      read-only disk and loses its changes when it stops;
+#   2. boots the VM and, with scripts/provision.sh, installs the btrfs and ZFS software, Avahi, which announces the
+#      VM with Bonjour, and Samba, which shares it with the Mac (internet access is needed); installs the back-end
+#      (vm/bridgebox-backend.py), which mounts the disks for bin/BridgeBox; then seals the image with scripts/seal.sh,
+#      so that from then on the VM runs from a read-only disk and loses its changes when it stops;
 #   3. boots the sealed VM, to check that it runs from a read-only disk, that the ZFS and btrfs kernel modules load
-#      with the upgraded kernel and that the VM is announced with Bonjour.
+#      with the upgraded kernel, that Samba is running and that the VM is announced with Bonjour.
 #
 # If a step fails, running it again resumes from that step (provisioning is idempotent).
 # The VM is then controlled with bin/BridgeBox.
@@ -113,7 +113,7 @@ verify() {
     log "$MDNS_NAME resolves to $("$BRIDGEBOX" ip)"
     "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay" \
         && uname -r && doas modprobe zfs && doas modprobe btrfs && doas zfs version && btrfs --version \
-        && doas rc-service avahi-daemon status'
+        && doas rc-service avahi-daemon status && doas rc-service samba status'
     "$BRIDGEBOX" ssh "doas $BACKEND unmount && echo 'the back-end runs'"
     shutdown_vm
 }

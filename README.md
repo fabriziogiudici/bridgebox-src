@@ -30,9 +30,10 @@ make clean    # stops and deletes the VM (the Alpine image is kept; 'make distcl
 ```
 
 `make image` runs `scripts/prepare-vm.sh`, which boots the VM once to install `btrfs-progs`, `zfs` and `zfs-virt`
-(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images) and Avahi, with `scripts/provision.sh`, and
-seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs from a read-only disk, that
-the kernel modules load and that the Mac can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
+(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and Samba, with
+`scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs
+from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the VM with
+Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
 (`bin/BridgeBox start [disk...] | stop | status | ip | ssh [command...]`). Settings shared by the two scripts are in
 `scripts/config.sh`.
 
@@ -55,11 +56,20 @@ imports all the ZFS pools found on them with `zpool import -f -N -R /srv/bridgeb
 `/srv/bridgebox/Clone2/Data`, without changing the mount points stored in the pool), asks for the passphrase of each
 encryption root (three attempts) and mounts the datasets. It also mounts the btrfs filesystems found on them (after
 `btrfs device scan`, so that filesystems on more than one partition work too) on `/srv/bridgebox/<label>`, or
-`/srv/bridgebox/<uuid>` when the filesystem has no label, the label isn't usable as a directory name or another pool
-or filesystem has the same name; the top-level subvolume is mounted (`subvolid=5`), so that all the subvolumes are
-visible as directories, with the default options of the kernel. A btrfs filesystem with missing devices isn't mounted.
-`stop` has the back-end unmount the btrfs filesystems and export the pools first, and doesn't power off the VM if that
-fails (for instance, when a file is still open).
+`/srv/bridgebox/<uuid>` when the filesystem has no label, the label isn't usable as a share name or another pool or
+filesystem has the same name; the top-level subvolume is mounted (`subvolid=5`), so that all the subvolumes are visible
+as directories, with the default options of the kernel. A btrfs filesystem with missing devices isn't mounted. `stop`
+has the back-end stop sharing, unmount the btrfs filesystems and export the pools first, and doesn't power off the VM
+if that fails (for instance, when a file is still open, or a share is still connected from the Finder).
+
+Each mounted pool is shared with SMB as a share with the name of the pool (e.g. `smb://bridgebox.local/Clone2`), and
+each btrfs filesystem as a share with the name of its mount point, so that the Mac sees the free space of each one; a
+pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared. The shares are read-write, with
+guest access (files are accessed as root). The VM is announced with Bonjour, so `bridgebox` appears in the sidebar of
+the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and connect as guest. NetBIOS is
+disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags, extended attributes) are
+stored as extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks
+still use `._` files).
 
 Files in `target/vm`:
 

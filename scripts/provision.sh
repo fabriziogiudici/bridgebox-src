@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Runs as root inside the VM (sent by scripts/prepare-vm.sh): installs the btrfs and ZFS software, and Avahi to
-# announce the VM with Bonjour. It can be run more than once.
+# Runs as root inside the VM (sent by scripts/prepare-vm.sh): installs the btrfs and ZFS software, Avahi to announce
+# the VM with Bonjour, and Samba to share it with the Mac. It can be run more than once.
 #
 set -eu
 
@@ -52,5 +52,77 @@ fi
 for service in dbus avahi-daemon; do
     [ -e "/etc/runlevels/default/$service" ] || rc-update add "$service" default
 done
+
+# Samba shares each ZFS pool and each btrfs filesystem mounted by the back-end under /srv/bridgebox as a share of its
+# own, so that the Mac sees the real free space of each one. The shares are written by the back-end in
+# bridgebox-shares.conf, which is empty in the image. They are read-write, to guests: they are reachable only from the
+# Mac. Files are accessed as root, so that nothing is hidden by permissions. NetBIOS is disabled (nmbd isn't started,
+# no port 139): the Mac finds the VM with Bonjour and connects on port 445.
+echo "==> Installing Samba"
+apk add samba
+mkdir -p /srv/bridgebox
+
+# Samba must be able to resolve the host name of the VM: otherwise the SMB negotiation waits for a DNS timeout and then
+# fails (NT_STATUS_INVALID_PARAMETER). cloud-init sets the host name, but doesn't add it to /etc/hosts.
+name="$(hostname)"
+if ! awk -v name="$name" '!/^[[:space:]]*#/ { for (i = 2; i <= NF; i++) if ($i == name) found = 1 }
+                          END { exit !found }' /etc/hosts; then
+    echo "127.0.1.1	$name" >> /etc/hosts
+fi
+
+cat > /etc/samba/smb.conf << 'EOF'
+# Written by scripts/provision.sh.
+[global]
+   server role = standalone server
+   server string = BridgeBox
+   disable netbios = yes
+   smb ports = 445
+   server min protocol = SMB2
+   map to guest = Bad User
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+   log file = /var/log/samba/%m.log
+   max log size = 50
+   # Defaults for the shares written by the back-end.
+   read only = no
+   guest ok = yes
+   guest only = yes
+   force user = root
+   # macOS metadata (Finder info, tags, extended attributes) are stored as extended attributes of the files,
+   # instead of AppleDouble ._ files.
+   vfs objects = catia fruit streams_xattr
+   fruit:metadata = stream
+   fruit:model = MacSamba
+   fruit:posix_rename = yes
+   fruit:veto_appledouble = no
+   fruit:nfs_aces = no
+   fruit:wipe_intentionally_left_blank_rfork = yes
+   fruit:delete_empty_adfiles = yes
+
+include = /etc/samba/bridgebox-shares.conf
+EOF
+echo "# Written by bridgebox-backend: one share for each mounted volume." > /etc/samba/bridgebox-shares.conf
+conf=/etc/conf.d/samba
+sed -i 's/^daemon_list=.*/daemon_list="smbd"/' "$conf"
+if ! grep -q '^daemon_list="smbd"$' "$conf"; then
+    echo "ERROR: unexpected format of $conf" >&2
+    exit 1
+fi
+[ -e /etc/runlevels/default/samba ] || rc-update add samba default
+
+# Announces the SMB share with Bonjour, so the VM appears in the sidebar of the Finder.
+cat > /etc/avahi/services/smb.service << 'EOF'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+</service-group>
+EOF
 
 sync
