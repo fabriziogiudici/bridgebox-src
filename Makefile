@@ -20,7 +20,7 @@ MAC ?= 02:bb:b0:00:00:01
 export ALPINE_VERSION CPUS MEMORY_MB MAC VFKIT
 
 # Version of the installer package.
-VERSION ?= 1.0
+VERSION ?= 1.1
 
 PREPARE := scripts/prepare-vm.sh
 BRIDGEBOX := bin/BridgeBox
