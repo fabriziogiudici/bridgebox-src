@@ -66,6 +66,10 @@ mkdir -p /srv/bridgebox
 echo "==> Installing iotop"
 apk add iotop
 
+# cryptsetup can be used to mount VeraCrypt volumes
+echo "==> Installing cryptsetup"
+apk add cryptsetup
+
 
 # Samba must be able to resolve the host name of the VM: otherwise the SMB negotiation waits for a DNS timeout and then
 # fails (NT_STATUS_INVALID_PARAMETER). cloud-init sets the host name, but doesn't add it to /etc/hosts.

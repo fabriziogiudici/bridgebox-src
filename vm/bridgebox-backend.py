@@ -17,18 +17,23 @@
 """BridgeBox back-end: runs as root inside the VM, installed as /usr/local/sbin/bridgebox-backend, and is called over
 ssh by the BridgeBox command on the Mac.
 
-    bridgebox-backend mount      imports all the ZFS pools found on the disks under /srv/bridgebox, asks for the
-                                 passphrases of the encrypted ones and mounts their datasets; mounts the btrfs
-                                 filesystems under /srv/bridgebox too; shares each pool and each btrfs filesystem
-                                 with Samba
-    bridgebox-backend unmount    stops sharing, unmounts the btrfs filesystems and exports the ZFS pools (which
-                                 unmounts them and unloads their keys)
+    bridgebox-backend mount      opens the LUKS volumes found on the disks, asking for their passphrases; imports
+                                 all the ZFS pools found on the disks (and in the LUKS volumes) under /srv/bridgebox,
+                                 asks for the passphrases of the encrypted ones and mounts their datasets; mounts the
+                                 btrfs filesystems under /srv/bridgebox too; shares each pool and each btrfs
+                                 filesystem with Samba
+    bridgebox-backend unmount    stops sharing, unmounts the btrfs filesystems, exports the ZFS pools (which unmounts
+                                 them and unloads their keys) and closes the LUKS volumes
 
 Each pool and each btrfs filesystem has its own share, so that the Mac sees its free space: macOS asks for the free
 space of the whole share, and /srv/bridgebox itself is in the RAM of the VM.
 
 Pools are imported with -f, since the disks are attached to this VM only: they often were last used by another system
 (a different host id), and couldn't be imported otherwise.
+
+A LUKS volume is opened as /dev/mapper/bridgebox-<LUKS uuid>, where 'zpool import' and 'btrfs device scan' find what
+it contains; volumes that are already open (for instance, by hand) are left alone, and only the ones opened by the
+back-end are closed.
 
 A btrfs filesystem is mounted on /srv/bridgebox/<label>, or /srv/bridgebox/<uuid> when it has no label, or the label
 isn't usable as a share name, or another pool or filesystem has the same name. Its top-level subvolume (subvolid=5) is
@@ -45,6 +50,8 @@ import sys
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 PASSPHRASE_ATTEMPTS = 3
+SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
+LUKS_PREFIX = "bridgebox-"                          # of the names of the LUKS volumes opened by the back-end
 
 
 def log(message):
@@ -232,9 +239,69 @@ def update_shares(excluded=()):
     return shared
 
 
+def closed_luks_volumes():
+    """Returns (device, uuid, label) of the LUKS volumes on the disks and partitions of the VM that aren't open: an open
+    volume has a holder, its device-mapper device. The label is None if the volume has none (LUKS1 has no labels)."""
+    volumes = []
+    for name in sorted(os.listdir(SYS_BLOCK)):
+        holders = os.path.join(SYS_BLOCK, name, "holders")
+        if name.startswith(("dm-", "loop", "ram", "zram", "sr")) or (os.path.isdir(holders) and os.listdir(holders)):
+            continue
+        device = f"/dev/{name}"
+        if subprocess.run(["cryptsetup", "isLuks", device], capture_output=True).returncode != 0:
+            continue
+        uuid = output("cryptsetup", "luksUUID", device).strip()
+        dump = subprocess.run(["cryptsetup", "luksDump", device], capture_output=True, text=True).stdout
+        match = re.search(r"^Label:\s*(.*?)\s*$", dump, re.MULTILINE)
+        label = match.group(1) if match and match.group(1) not in ("", "(no label)") else None
+        volumes.append((device, uuid, label))
+    return volumes
+
+
+def open_luks():
+    """Opens the LUKS volumes found on the disks, asking for their passphrases; returns the number of the ones that
+    couldn't be opened."""
+    failures = 0
+    for device, uuid, label in closed_luks_volumes():
+        description = f"the LUKS volume {label or uuid} ({device})"
+        log(f"Opening {description}")
+        # cryptsetup reads the passphrase from the terminal, which ssh allocates with -t, and asks again if it's wrong.
+        command = ["cryptsetup", "open", f"--tries={PASSPHRASE_ATTEMPTS}", device, LUKS_PREFIX + uuid]
+        if subprocess.run(command).returncode != 0:
+            warn(f"{description} hasn't been opened: the pools and filesystems in it won't be mounted")
+            failures += 1
+    return failures
+
+
+def opened_luks_volumes():
+    """Returns the device-mapper names of the LUKS volumes opened by the back-end."""
+    names = []
+    for name in sorted(os.listdir(SYS_BLOCK)):
+        if name.startswith("dm-"):
+            with open(os.path.join(SYS_BLOCK, name, "dm", "name")) as file:
+                dm_name = file.read().strip()
+            if dm_name.startswith(LUKS_PREFIX):
+                names.append(dm_name)
+    return names
+
+
+def close_luks():
+    """Closes the LUKS volumes opened by the back-end; returns the number of the ones that couldn't be closed (for
+    instance, because a pool in them couldn't be exported)."""
+    failures = 0
+    for name in opened_luks_volumes():
+        log(f"Closing the LUKS volume {name}")
+        result = subprocess.run(["cryptsetup", "close", name], capture_output=True, text=True)
+        if result.returncode != 0:
+            warn(f"can't close the LUKS volume {name}: {(result.stderr or result.stdout).strip()}")
+            failures += 1
+    return failures
+
+
 def mount():
     os.makedirs(MOUNT_ROOT, exist_ok=True)
-    failures = 0
+    # The LUKS volumes are opened first, so that the pools and filesystems in them are found.
+    failures = open_luks()
     for name, pool_id in importable_pools():
         log(f"Importing the ZFS pool {name}")
         result = subprocess.run(["zpool", "import", "-f", "-N", "-R", MOUNT_ROOT, pool_id], capture_output=True,
@@ -269,6 +336,7 @@ def unmount():
             warn(f"can't export {name} (is it still connected from the Mac? Eject it in the Finder): "
                  f"{result.stderr.strip()}")
             failures += 1
+    failures += close_luks()
     if failures:
         update_shares()
     return 1 if failures else 0

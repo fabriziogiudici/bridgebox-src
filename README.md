@@ -20,7 +20,8 @@ vfkit requires, so no conversion tool is needed.
 ```shell
 make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
-              # whose ZFS pools and btrfs filesystems are mounted under /srv/bridgebox (the passphrases are asked for)
+              # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
+              # passphrases are asked for)
 make ssh      # logs in as the 'alpine' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
@@ -52,15 +53,17 @@ taken from `/var/db/dhcpd_leases`, by the fixed MAC address of the VM.
 
 Mounting is done inside the VM by a back-end, `vm/bridgebox-backend.py` (installed in the image as
 `/usr/local/sbin/bridgebox-backend`), which `bin/BridgeBox` runs over ssh. When partitions are passed to `start`, it
-imports all the ZFS pools found on them with `zpool import -f -N -R /srv/bridgebox` (so `Clone2/Data` is mounted on
+first opens the LUKS volumes found on them, asking for their passphrases (three attempts), as
+`/dev/mapper/bridgebox-<LUKS uuid>`; then it imports all the ZFS pools found on the partitions and in the LUKS volumes
+with `zpool import -f -N -R /srv/bridgebox` (so `Clone2/Data` is mounted on
 `/srv/bridgebox/Clone2/Data`, without changing the mount points stored in the pool), asks for the passphrase of each
 encryption root (three attempts) and mounts the datasets. It also mounts the btrfs filesystems found on them (after
 `btrfs device scan`, so that filesystems on more than one partition work too) on `/srv/bridgebox/<label>`, or
 `/srv/bridgebox/<uuid>` when the filesystem has no label, the label isn't usable as a share name or another pool or
 filesystem has the same name; the top-level subvolume is mounted (`subvolid=5`), so that all the subvolumes are visible
 as directories, with the default options of the kernel. A btrfs filesystem with missing devices isn't mounted. `stop`
-has the back-end stop sharing, unmount the btrfs filesystems and export the pools first, and doesn't power off the VM
-if that fails (for instance, when a file is still open, or a share is still connected from the Finder).
+has the back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened
+first, and doesn't power off the VM if that fails (for instance, when a file is still open, or a share is still connected from the Finder).
 
 Each mounted pool is shared with SMB as a share with the name of the pool (e.g. `smb://bridgebox.local/Clone2`), and
 each btrfs filesystem as a share with the name of its mount point, so that the Mac sees the free space of each one; a
