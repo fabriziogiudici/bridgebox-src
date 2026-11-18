@@ -54,16 +54,17 @@ their partitions, as `diskutil list` shows them, e.g. `BridgeBox start disk10s2 
 mounted by macOS (unmount it with `diskutil unmount`); if the user can't access it, `sudo` asks for the password to give
 it to the user. Disks can't be added to a running VM: it must be stopped first.
 
-The VM imports all the ZFS pools found on the partitions, asks for the passphrase of each encryption root (three
-attempts) and mounts the datasets under `/srv/bridgebox` (e.g. `MyVolume/Data` on `/srv/bridgebox/MyVolume/Data`),
-without changing the mount points stored in the pools. It also mounts the btrfs filesystems found on them, also on more
-than one partition, on `/srv/bridgebox/<label>`, or `/srv/bridgebox/<uuid>` when the filesystem has no label, the label
-isn't usable as a share name or another pool or filesystem has the same name; all the subvolumes are visible as
-directories. A btrfs filesystem with missing devices isn't mounted.
+The VM first opens the LUKS volumes found on the partitions, asking for their passphrases (three attempts); then it
+imports all the ZFS pools found on the partitions and in the LUKS volumes, asks for the passphrase of each encryption
+root (three attempts) and mounts the datasets under `/srv/bridgebox` (e.g. `MyVolume/Data` on
+`/srv/bridgebox/MyVolume/Data`), without changing the mount points stored in the pools. It also mounts the btrfs
+filesystems found on them, also on more than one partition, on `/srv/bridgebox/<label>`, or `/srv/bridgebox/<uuid>` when
+the filesystem has no label, the label isn't usable as a share name or another pool or filesystem has the same name; all
+the subvolumes are visible as directories. A btrfs filesystem with missing devices isn't mounted.
 
-`stop` stops sharing, unmounts the btrfs filesystems and exports the pools; then it stops the VM, forcing it off if it
-doesn't react. If the disks can't be unmounted (for instance, when a file is still open, or a share is still connected
-from the Finder), the VM is left running.
+`stop` stops sharing, unmounts the btrfs filesystems, exports the pools and closes the LUKS volumes; then it stops the
+VM, forcing it off if it doesn't react. If the disks can't be unmounted (for instance, when a file is still open, or a
+share is still connected from the Finder), the VM is left running.
 
 `status` shows the state of the VM as reported by vfkit, and `ip` its IP address. `ssh` logs in to the VM as the user
 `alpine`, who can run commands as root with `doas`; with a command, it runs it, e.g. `BridgeBox ssh doas getfattr -d
@@ -87,7 +88,8 @@ extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._`
 ```shell
 make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
-              # whose ZFS pools and btrfs filesystems are mounted under /srv/bridgebox (the passphrases are asked for)
+              # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
+              # passphrases are asked for)
 make ssh      # logs in as the 'alpine' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
@@ -121,11 +123,13 @@ from `/var/db/dhcpd_leases`, by the fixed MAC address of the VM.
 
 Mounting is done inside the VM by a back-end, `vm/bridgebox-backend.py` (installed in the image as
 `/usr/local/sbin/bridgebox-backend`), which `bin/BridgeBox` runs over ssh. When partitions are passed to `start`, it
-imports all the ZFS pools found on them with `zpool import -f -N -R /srv/bridgebox`, loads the keys and mounts the
-datasets. It mounts the btrfs filesystems after `btrfs device scan`, so that filesystems on more than one partition work
-too; the top-level subvolume is mounted (`subvolid=5`), with the default options of the kernel. `stop` has the back-end
-stop sharing, unmount the btrfs filesystems, export the pools first, and doesn't power off the VM if that fails;
-otherwise the VM gets a Stop request first, and a HardStop if the guest doesn't react.
+first opens the LUKS volumes found on them as `/dev/mapper/bridgebox-<LUKS uuid>`; then it imports all the ZFS pools
+found on the partitions and in the LUKS volumes with `zpool import -f -N -R /srv/bridgebox`, loads the keys and mounts
+the datasets. It mounts the btrfs filesystems after `btrfs device scan`, so that filesystems on more than one partition
+work too; the top-level subvolume is mounted (`subvolid=5`), with the default options of the kernel. `stop` has the
+back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened first,
+and doesn't power off the VM if that fails; otherwise the VM gets a Stop request first, and a HardStop if the guest
+doesn't react.
 
 Files in `target/vm`:
 

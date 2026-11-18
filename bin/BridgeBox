@@ -19,9 +19,10 @@
 #   BridgeBox start [disk...]
 #                       starts the VM in background, with the given partitions (e.g. disk10s2, as shown by 'diskutil
 #                       list' or scripts/detect-partitions.sh) as additional disks, and waits until it's reachable over
-#                       ssh; if partitions were given, mounts the ZFS pools and btrfs filesystems found on them under
-#                       /srv/bridgebox
-#   BridgeBox stop      unmounts the disks and stops the VM (Stop, then HardStop if the guest doesn't react)
+#                       ssh; if partitions were given, opens the LUKS volumes and mounts the ZFS pools and btrfs
+#                       filesystems found on them under /srv/bridgebox
+#   BridgeBox stop      unmounts the disks, closes the LUKS volumes and stops the VM (Stop, then HardStop if the guest
+#                       doesn't react)
 #   BridgeBox status    prints the VM state as reported by vfkit
 #   BridgeBox ip        prints the IP address of the VM
 #   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
@@ -198,8 +199,9 @@ cmd_start() {
 
     log "The VM is running at $ip ('BridgeBox ssh' to log in)"
 
-    # The back-end in the VM mounts the ZFS pools and the btrfs filesystems found on the disks under /srv/bridgebox,
-    # asking for the passphrases of the encrypted pools: ssh allocates a terminal (-t) for that.
+    # The back-end in the VM opens the LUKS volumes found on the disks, then mounts the ZFS pools and the btrfs
+    # filesystems found on the disks and in the LUKS volumes under /srv/bridgebox, asking for the passphrases of the
+    # LUKS volumes and of the encrypted pools: ssh allocates a terminal (-t) for that.
     if [ $# -gt 0 ]; then
         vm_ssh -t doas "$BACKEND" mount || warn "not all the filesystems on the disks could be mounted"
     fi
