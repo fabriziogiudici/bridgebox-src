@@ -40,6 +40,7 @@ BridgeBox start [disk...]                      # starts the VM and mounts the di
 BridgeBox stop                                 # unmounts the disks and stops the VM
 BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
+BridgeBox speed-test [--mixed]                 # measures the speed of the disks
 BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
 BridgeBox uninstall                            # removes BridgeBox
 ```
@@ -82,6 +83,21 @@ Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags
 extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks still use
 `._` files).
 
+### Measuring the speed
+
+`speed-test` measures with `fio`, in turn, the speed of each pool whose root dataset is mounted and of each btrfs
+filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in 1 MiB blocks
+through the cache, including the time to flush it to the disk; then, after dropping the caches, it reads back what was
+written, through the cache too, as the Finder or a copy does (direct I/O isn't used for reading, since on ZFS it
+disables the read-ahead and would measure the latency of the disk rather than its throughput). With `--mixed`, it reads
+and writes at the same time, half and half, with direct I/O and 16 requests in flight: this measures the total
+throughput of the disk under a mixed load, split between the two directions. Each run lasts at most 30 seconds; at the
+end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows them).
+
+The test file is 4 GiB; if there isn't enough free space (with a margin of 256 MiB), 2 GiB and then 1 GiB are tried,
+with a warning; if even 1 GiB doesn't fit, an error is reported for that volume and the test goes on with the next one.
+The file is written in a temporary directory in the volume, which is always deleted.
+
 
 ## Development
 
@@ -93,6 +109,7 @@ make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 .
 make ssh      # logs in as the 'alpine' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
+make speed-test # measures with fio the write and read speed of each mounted pool and btrfs filesystem
 make console  # follows the serial console
 make stop     # unmounts the disks and stops the VM: Stop request first, HardStop if the guest doesn't react
 make clean    # stops and deletes the VM (the Alpine image is kept; 'make distclean' deletes it too)

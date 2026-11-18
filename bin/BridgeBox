@@ -25,6 +25,9 @@
 #                       doesn't react)
 #   BridgeBox status    prints the VM state as reported by vfkit
 #   BridgeBox ip        prints the IP address of the VM
+#   BridgeBox speed-test [--mixed]
+#                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
+#                       copy does them, then sequential reads; with '--mixed', reads and writes at the same time
 #   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
 #   BridgeBox uninstall removes BridgeBox, when installed by the package (with sudo)
 #
@@ -268,6 +271,14 @@ cmd_status() {
     fi
 }
 
+# The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
+# LogLevel=ERROR drops the "Connection to ... closed" message that ssh prints at the end when it allocates a terminal.
+cmd_speed_test() {
+    [ $# -eq 0 ] || { [ $# -eq 1 ] && [ "$1" = --mixed ]; } || die "usage: $(basename "$0") speed-test [--mixed]"
+    is_running || die "the VM is not running: start it with the disks to test ('BridgeBox start disk...')"
+    vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" speed-test "$@"
+}
+
 cmd_ip() {
     local ip
     ip="$(find_ip)" || true
@@ -294,8 +305,10 @@ case "${1:-}" in
     stop)    cmd_stop ;;
     status)  cmd_status ;;
     ip)      cmd_ip ;;
+    speed-test) shift; cmd_speed_test "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
-    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | ssh [command...] | uninstall}" >&2
+    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | speed-test [--mixed]" \
+                  "| ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac

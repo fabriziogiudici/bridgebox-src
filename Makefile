@@ -25,7 +25,7 @@ VERSION ?= 1.1
 PREPARE := scripts/prepare-vm.sh
 BRIDGEBOX := bin/BridgeBox
 
-.PHONY: image start stop status ip ssh console pkg clean distclean
+.PHONY: image start stop status ip ssh speed-test console pkg clean distclean
 
 # Downloads the Alpine cloud image (cached in cache/) and prepares the VM in target/vm.
 image:
@@ -48,6 +48,9 @@ ip:
 
 ssh:
 	$(BRIDGEBOX) ssh
+
+speed-test:
+	$(BRIDGEBOX) speed-test
 
 # Builds the installer package target/BridgeBox-$(VERSION).pkg from the prepared VM; vfkit is included in the package,
 # taken from VFKIT (or PATH).

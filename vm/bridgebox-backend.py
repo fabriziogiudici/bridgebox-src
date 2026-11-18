@@ -24,6 +24,10 @@ ssh by the BridgeBox command on the Mac.
                                  filesystem with Samba
     bridgebox-backend unmount    stops sharing, unmounts the btrfs filesystems, exports the ZFS pools (which unmounts
                                  them and unloads their keys) and closes the LUKS volumes
+    bridgebox-backend speed-test [--mixed]
+                                 measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
+                                 sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
+                                 writes at the same time, half and half, with direct I/O
 
 Each pool and each btrfs filesystem has its own share, so that the Mac sees its free space: macOS asks for the free
 space of the whole share, and /srv/bridgebox itself is in the RAM of the VM.
@@ -41,17 +45,25 @@ mounted, so that all the subvolumes are visible as directories; besides that, th
 used. A filesystem with missing devices isn't mounted.
 """
 
+import errno
+import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
 LUKS_PREFIX = "bridgebox-"                          # of the names of the LUKS volumes opened by the back-end
+SPEED_TEST_SIZES_GIB = (4, 2, 1)                    # sizes of the test file, tried in turn until one fits
+SPEED_TEST_MARGIN = 256 * 1024 ** 2                 # bytes that must be left free besides the test file
+SPEED_TEST_RUNTIME = 30                             # seconds, at most, of each fio run
+SPEED_TEST_FILE = "bridgebox-speed-test"
 
 
 def log(message):
@@ -60,6 +72,10 @@ def log(message):
 
 def warn(message):
     print(f"WARNING: {message}", file=sys.stderr, flush=True)
+
+
+def error(message):
+    print(f"ERROR: {message}", file=sys.stderr, flush=True)
 
 
 def output(*command):
@@ -239,6 +255,151 @@ def update_shares(excluded=()):
     return shared
 
 
+def mounted_volumes():
+    """Returns (name, mount point) of each imported pool whose root dataset is mounted and of each btrfs filesystem
+    mounted under MOUNT_ROOT: the same volumes that are shared."""
+    volumes = []
+    for pool in imported_pools():
+        root = next((d for d in datasets(pool, "mountpoint", "mounted") if d["name"] == pool), None)
+        if root is None or root["mounted"] != "yes":
+            warn(f"{pool} isn't tested, since its root dataset isn't mounted")
+            continue
+        volumes.append((pool, root["mountpoint"]))
+    return volumes + [(os.path.basename(point), point) for point in btrfs_mounts()]
+
+
+class SpeedTestError(Exception):
+    """A fio run failed; 'full' tells whether the disk got full."""
+
+    def __init__(self, message, full=False):
+        super().__init__(message)
+        self.full = full
+
+
+def split_fio_report(text):
+    """fio writes the normal report and the JSON one to the same file, the latter in the middle. Returns the first job
+    of the JSON report (None if there's none) and the normal report."""
+    if text.startswith("{\n"):
+        start = 0
+    else:
+        start = text.find("\n{\n")
+        if start < 0:
+            return None, text
+        start += 1
+    try:
+        report, end = json.JSONDecoder().raw_decode(text, start)
+    except ValueError:
+        return None, text
+    jobs = report.get("jobs") or [None]
+    return jobs[0], text[:start] + text[end:].lstrip("\n")
+
+
+def run_fio(name, directory, *options):
+    """Runs a fio job on the test file in the directory, then prints its report (while it runs, fio shows its
+    progress). Returns the result of the job, from the JSON report; raises SpeedTestError if it failed."""
+    with tempfile.TemporaryDirectory(prefix="bridgebox-fio-") as temporary:
+        output = os.path.join(temporary, "report")
+        command = ["fio", f"--name={name}", f"--directory={directory}", f"--filename={SPEED_TEST_FILE}", "--bs=1M",
+                   "--numjobs=1", f"--runtime={SPEED_TEST_RUNTIME}", "--group_reporting",
+                   "--output-format=normal,json", f"--output={output}", *options]
+        result = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+        text = open(output).read() if os.path.exists(output) else ""
+    job, report = split_fio_report(text)
+    sys.stdout.write(report)
+    sys.stdout.flush()
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0 or job is None or job.get("error"):
+        full = "No space left on device" in result.stderr or (job is not None and job.get("error") == errno.ENOSPC)
+        raise SpeedTestError(f"fio failed ({name})", full)
+    return job
+
+
+def sequential_test(directory, size_gib):
+    """Writes the test file as a copy does (with buffered I/O, including the time to flush it to the disk), then reads
+    back what was written in the same way, as the Finder or a copy does: through the cache, with the read-ahead of
+    the filesystem. Direct I/O isn't used for reading, since on ZFS it disables the prefetch and blocks on each
+    request, so it would measure the latency of the disk rather than its throughput. The caches are dropped in
+    between, so that the file is read from the disk: on ZFS, part of it may still be in the ARC, but the ARC of the
+    VM is much smaller than the test file. Returns the speeds, in bytes per second."""
+    job = run_fio("seq_write", directory, f"--size={size_gib}G", "--rw=write", "--ioengine=psync", "--end_fsync=1")
+    write, written = job["write"]["bw_bytes"], job["write"]["io_bytes"]
+    if written == 0:
+        raise SpeedTestError("nothing has been written")
+    os.sync()
+    with open("/proc/sys/vm/drop_caches", "w") as file:
+        file.write("3\n")
+    # Only what was written is read: the run stops after SPEED_TEST_RUNTIME seconds, and the rest of the file would
+    # be read from holes, at a speed that means nothing.
+    job = run_fio("seq_read", directory, f"--size={written}", "--rw=read", "--ioengine=psync")
+    return {"write": write, "read": job["read"]["bw_bytes"]}
+
+
+def mixed_test(directory, size_gib):
+    """Reads and writes the test file at the same time, half and half, with direct I/O. Returns the speeds, in bytes
+    per second."""
+    job = run_fio("seq_async", directory, f"--size={size_gib}G", "--rw=readwrite", "--rwmixread=50", "--direct=1",
+                  "--ioengine=libaio", "--iodepth=16")
+    return {"read": job["read"]["bw_bytes"], "write": job["write"]["bw_bytes"]}
+
+
+def speed_test_volume(name, point, test):
+    """Measures the speed of a volume with the largest test file that fits. Returns the speeds, or the reason why the
+    volume hasn't been tested. The test file is in a temporary directory, which is always removed."""
+    sizes = list(SPEED_TEST_SIZES_GIB)
+    while sizes:
+        size = sizes.pop(0)
+        stat = os.statvfs(point)
+        available = stat.f_bavail * stat.f_frsize
+        if available < size * 1024 ** 3 + SPEED_TEST_MARGIN:
+            reason = f"there's no space for a {size} GiB test file ({available // 1024 ** 2} MiB available)"
+        else:
+            log(f"Testing {name} ({point}) with a {size} GiB file")
+            directory = tempfile.mkdtemp(prefix=".bridgebox-speed-test-", dir=point)
+            try:
+                return test(directory, size)
+            except SpeedTestError as exception:
+                if not exception.full:
+                    error(f"the test of {name} failed: {exception}")
+                    return "the test failed"
+                reason = f"it got full with a {size} GiB test file"
+            finally:
+                shutil.rmtree(directory, ignore_errors=True)
+        if not sizes:
+            error(f"{name} hasn't been tested: {reason}")
+            return f"not tested: {reason}"
+        warn(f"{name}: {reason}, trying with {sizes[0]} GiB")
+    return "not tested"
+
+
+def print_summary(results):
+    """Prints the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows them), one line for each volume."""
+    log("Summary (1 MB = 1,000,000 bytes)")
+    width = max(len(name) for name, _ in results)
+    for name, result in results:
+        if isinstance(result, str):
+            line = result
+        else:
+            line = "   ".join(f"{direction} {speed / 1e6:5.0f} MB/s" for direction, speed in result.items())
+        print(f"    {name:<{width}}   {line}", flush=True)
+
+
+def speed_test(mode="sequential"):
+    volumes = mounted_volumes()
+    if not volumes:
+        error("there are no mounted pools or btrfs filesystems to test: pass their disks to 'BridgeBox start'")
+        return 1
+    test = mixed_test if mode == "--mixed" else sequential_test
+    results = []
+    try:
+        for name, point in volumes:
+            results.append((name, speed_test_volume(name, point, test)))
+    except KeyboardInterrupt:
+        error("the speed test has been interrupted")
+        return 130
+    print_summary(results)
+    return 1 if any(isinstance(result, str) for _, result in results) else 0
+
+
 def closed_luks_volumes():
     """Returns (device, uuid, label) of the LUKS volumes on the disks and partitions of the VM that aren't open: an open
     volume has a holder, its device-mapper device. The label is None if the volume has none (LUKS1 has no labels)."""
@@ -343,14 +504,14 @@ def unmount():
 
 
 def main():
-    commands = {"mount": mount, "unmount": unmount}
-    if len(sys.argv) != 2 or sys.argv[1] not in commands:
-        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount}}", file=sys.stderr)
+    commands = {"mount": mount, "unmount": unmount, "speed-test": speed_test}
+    if sys.argv[1:] not in (["mount"], ["unmount"], ["speed-test"], ["speed-test", "--mixed"]):
+        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | speed-test [--mixed]}}", file=sys.stderr)
         return 1
     if os.geteuid() != 0:
         print("ERROR: must run as root", file=sys.stderr)
         return 1
-    return commands[sys.argv[1]]()
+    return commands[sys.argv[1]](*sys.argv[2:])
 
 
 if __name__ == "__main__":
