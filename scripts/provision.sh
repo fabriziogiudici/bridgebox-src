@@ -70,6 +70,10 @@ apk add iotop
 echo "==> Installing cryptsetup"
 apk add cryptsetup
 
+# fio is used by the back-end to measure the speed of the disks ('BridgeBox speed-test').
+echo "==> Installing fio"
+apk add fio
+
 
 # Samba must be able to resolve the host name of the VM: otherwise the SMB negotiation waits for a DNS timeout and then
 # fails (NT_STATUS_INVALID_PARAMETER). cloud-init sets the host name, but doesn't add it to /etc/hosts.
