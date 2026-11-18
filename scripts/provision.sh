@@ -62,6 +62,11 @@ echo "==> Installing Samba"
 apk add samba
 mkdir -p /srv/bridgebox
 
+# iotop can be used for profiling
+echo "==> Installing iotop"
+apk add iotop
+
+
 # Samba must be able to resolve the host name of the VM: otherwise the SMB negotiation waits for a DNS timeout and then
 # fails (NT_STATUS_INVALID_PARAMETER). cloud-init sets the host name, but doesn't add it to /etc/hosts.
 name="$(hostname)"
