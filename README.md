@@ -41,7 +41,7 @@ the VM with Bonjour. This step needs internet access; if it fails, `make image` 
 other targets run `bin/BridgeBox`, which can also be invoked directly
 (`bin/BridgeBox start [--samba] [disk...] | stop | status | ip | disk-status [name] |
 trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name] | samba {start | stop | status} |
-speed-test [mixed] | ssh [command...]`).
+speed-test [mixed] | {zpool | zfs | btrfs} [argument...] | ssh [command...]`).
 Settings shared by the two scripts are in `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
@@ -109,6 +109,12 @@ Samba isn't started at boot: `samba start` starts it and announces it with Bonjo
 removes the announcement and stops Samba, so that the Mac doesn't see the shares anymore (a Mac that is connected loses
 them). `samba status` shows whether Samba runs and is announced, and, with `smbstatus`, the connected clients, the
 shares in use and the open files (useful when `stop` can't export a pool because a file is still open).
+
+`zpool`, `zfs` and `btrfs` run the command with the same name in the VM, as root, with the given arguments as they
+are, e.g. `bin/BridgeBox zpool status -v Clone2` or `bin/BridgeBox zfs list -o space`. The exit status is the
+command's. A terminal is used only when `bin/BridgeBox` runs in one, so that the commands that ask for something (e.g.
+`zfs load-key`) work, while in pipes and scripts the output is the plain one (e.g. `bin/BridgeBox zfs list -H -o name |
+grep Music`).
 
 When Samba runs, each mounted pool is shared with SMB as a share with the name of the pool (e.g.
 `smb://bridgebox.local/Clone2`), and each btrfs filesystem as a share with the name of its mount point, so that the Mac
