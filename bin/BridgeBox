@@ -317,13 +317,13 @@ check_start_stop() {
 cmd_trim() {
     check_start_stop trim "$@"
     is_running || die "the VM is not running"
-    vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" trim "$@"
+    vm_ssh -t -o LogLevel=ERROR "doas $BACKEND trim$(quoted "$@")"
 }
 
 cmd_scrub() {
     check_start_stop scrub "$@"
     is_running || die "the VM is not running"
-    vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" scrub "$@"
+    vm_ssh -t -o LogLevel=ERROR "doas $BACKEND scrub$(quoted "$@")"
 }
 
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
