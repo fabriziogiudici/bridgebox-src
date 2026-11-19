@@ -27,8 +27,8 @@ ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 # The raw.tar.gz format (made for Google Cloud) is the same image as the qcow2 one, but in the raw format that vfkit
 # needs: so no conversion tool is required.
 ALPINE_IMAGE="${ALPINE_IMAGE:-alpine-${ALPINE_VERSION}-aarch64-cloudinit-r0.raw.tar.gz}"
-CPUS="${CPUS:-2}"
-MEMORY_MB="${MEMORY_MB:-1024}"
+CPUS="${CPUS:-4}"
+MEMORY_MB="${MEMORY_MB:-2048}"
 MAC="${MAC:-02:bb:b0:00:00:01}"     # fixed, locally administered: used to find the VM in the DHCP leases
 MDNS_NAME="${MDNS_NAME:-bridgebox.local}"   # announced by the VM with Bonjour (the host name comes from cloud-init)
 CACHE_DIR="${CACHE_DIR:-$ROOT/cache}"

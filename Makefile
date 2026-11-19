@@ -14,8 +14,8 @@
 
 # VM settings: can be overridden from the command line, e.g. make start MEMORY_MB=2048
 ALPINE_VERSION ?= 3.24.4
-CPUS ?= 2
-MEMORY_MB ?= 1024
+CPUS ?= 4
+MEMORY_MB ?= 2048
 MAC ?= 02:bb:b0:00:00:01
 export ALPINE_VERSION CPUS MEMORY_MB MAC VFKIT
 
