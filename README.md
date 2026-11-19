@@ -38,7 +38,8 @@ and Samba, with
 `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs
 from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the VM with
 Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
-(`bin/BridgeBox start [disk...] | stop | status | ip | speed-test [mixed] | ssh [command...]`). Settings shared by the two scripts are in
+(`bin/BridgeBox start [disk...] | stop | status | ip | disk-status [name] | speed-test [mixed] | ssh [command...]`).
+Settings shared by the two scripts are in
 `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
@@ -67,6 +68,13 @@ filesystem has the same name; the top-level subvolume is mounted (`subvolid=5`),
 as directories, with the default options of the kernel. A btrfs filesystem with missing devices isn't mounted. `stop`
 has the back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened
 first, and doesn't power off the VM if that fails (for instance, when a file is still open, or a share is still connected from the Finder).
+
+`disk-status` shows, for each imported ZFS pool, `zpool status -v -t -i -s -D` (errors, TRIM, initialization, slow I/O
+operations, deduplication), `zpool list -v` and the `autotrim` and `freeing` properties; for each mounted btrfs
+filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device stats`, `btrfs scrub status` and
+`btrfs balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its
+datasets), that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem
+(by the name of its mount point), e.g. `disk-status Clone2/Music`.
 
 `speed-test` has the back-end measure with `fio`, in turn, the speed of each pool whose root dataset is mounted and of
 each btrfs filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in

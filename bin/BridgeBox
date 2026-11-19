@@ -25,6 +25,10 @@
 #                       doesn't react)
 #   BridgeBox status    prints the VM state as reported by vfkit
 #   BridgeBox ip        prints the IP address of the VM
+#   BridgeBox disk-status [name]
+#                       shows the status of the ZFS pools and of the btrfs filesystems in the VM, with all the details
+#                       available (errors, TRIM, scrub, slow I/O operations, space); with a name, only of that pool,
+#                       dataset (with its properties) or btrfs filesystem
 #   BridgeBox speed-test [mixed]
 #                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
 #                       copy does them, then sequential reads; with 'mixed', reads and writes at the same time
@@ -271,6 +275,21 @@ cmd_status() {
     fi
 }
 
+# Quotes the arguments for the shell of the VM, since ssh passes the command as a single string: otherwise a name with
+# spaces (e.g. of a btrfs filesystem) would be split.
+quoted() {
+    local arg
+    for arg in "$@"; do
+        printf ' %q' "$arg"
+    done
+}
+
+cmd_disk_status() {
+    [ $# -le 1 ] && [[ "${1:-}" != -* ]] || die "usage: $(basename "$0") disk-status [name]"
+    is_running || die "the VM is not running"
+    vm_ssh -o LogLevel=ERROR "doas $BACKEND disk-status$(quoted "$@")"
+}
+
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
 # LogLevel=ERROR drops the "Connection to ... closed" message that ssh prints at the end when it allocates a terminal.
 cmd_speed_test() {
@@ -305,10 +324,11 @@ case "${1:-}" in
     stop)    cmd_stop ;;
     status)  cmd_status ;;
     ip)      cmd_ip ;;
+    disk-status) shift; cmd_disk_status "$@" ;;
     speed-test) shift; cmd_speed_test "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
-    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | speed-test [mixed]" \
-                  "| ssh [command...] | uninstall}" >&2
+    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | disk-status [name]" \
+                  "| speed-test [mixed] | ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac
