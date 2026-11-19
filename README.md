@@ -42,6 +42,7 @@ BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
 BridgeBox disk-status [name]                   # state of the pools and filesystems
 BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
+BridgeBox scrub {start [--wait] | stop} [name] # scrub of the pools and filesystems
 BridgeBox speed-test [--mixed]                 # measures the speed of the disks
 BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
 BridgeBox uninstall                            # removes BridgeBox
@@ -104,6 +105,13 @@ suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices do
 must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the LUKS
 header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim start`
 waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
+
+`scrub start` starts the scrub of each imported ZFS pool (`zpool scrub`) and of each mounted btrfs filesystem (`btrfs
+scrub start`), or only of the one given (e.g. `scrub start MyVolume`), which run in background in the VM; with `--wait`,
+it waits until they are finished (Ctrl-C stops waiting, not the scrub). `scrub stop` pauses them (`zpool scrub -p`,
+`btrfs scrub cancel`); the next `scrub start` resumes them from where they were: always for ZFS, which keeps the
+progress in the pool, but for btrfs only until the VM restarts, since btrfs keeps it in `/var/lib/btrfs`, which is in
+RAM. The results are shown by `disk-status`.
 
 ### Measuring the speed
 
