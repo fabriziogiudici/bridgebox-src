@@ -74,6 +74,9 @@ apk add cryptsetup
 echo "==> Installing fio"
 apk add fio
 
+# rsync rclone can be useful for maintenance
+echo "==> Installing rsync and rclone"
+apk add rsync rclone
 
 # Samba must be able to resolve the host name of the VM: otherwise the SMB negotiation waits for a DNS timeout and then
 # fails (NT_STATUS_INVALID_PARAMETER). cloud-init sets the host name, but doesn't add it to /etc/hosts.
