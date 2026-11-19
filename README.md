@@ -38,8 +38,8 @@ and Samba, with
 `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs
 from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the VM with
 Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
-(`bin/BridgeBox start [disk...] | stop | status | ip | disk-status [name] | speed-test [mixed] | ssh [command...]`).
-Settings shared by the two scripts are in
+(`bin/BridgeBox start [disk...] | stop | status | ip | disk-status [name] | trim {start [--wait] | stop} [name] |
+speed-test [mixed] | ssh [command...]`). Settings shared by the two scripts are in
 `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
@@ -75,6 +75,14 @@ filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device sta
 `btrfs balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its
 datasets), that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem
 (by the name of its mount point), e.g. `disk-status Clone2/Music`.
+
+`trim start` starts the TRIM of each imported ZFS pool (`zpool trim`), or only of the one given (e.g. `trim start
+Clone2`; a btrfs filesystem is given by the name of its mount point), which runs in background in the VM, or resumes
+it if it was suspended; with `--wait`, it waits until it's finished (Ctrl-C stops waiting, not the TRIM). `trim stop`
+suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices doesn't support it: e.g. a LUKS volume
+must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the
+LUKS header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim
+start` waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
 
 `speed-test` has the back-end measure with `fio`, in turn, the speed of each pool whose root dataset is mounted and of
 each btrfs filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in

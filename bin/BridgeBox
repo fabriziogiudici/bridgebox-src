@@ -29,6 +29,10 @@
 #                       shows the status of the ZFS pools and of the btrfs filesystems in the VM, with all the details
 #                       available (errors, TRIM, scrub, slow I/O operations, space); with a name, only of that pool,
 #                       dataset (with its properties) or btrfs filesystem
+#   BridgeBox trim {start [--wait] | stop} [name]
+#                       starts (or resumes) the TRIM of the ZFS pools and trims the btrfs filesystems; with --wait,
+#                       waits until it's finished; 'stop' suspends the TRIM of the ZFS pools; with a name, only of that
+#                       pool or btrfs filesystem
 #   BridgeBox speed-test [mixed]
 #                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
 #                       copy does them, then sequential reads; with 'mixed', reads and writes at the same time
@@ -290,6 +294,29 @@ cmd_disk_status() {
     vm_ssh -o LogLevel=ERROR "doas $BACKEND disk-status$(quoted "$@")"
 }
 
+# Checks the arguments of the commands that start or stop a background operation on the disks:
+# {start [--wait] | stop} [name], where name is a pool or a btrfs filesystem.
+check_start_stop() {
+    local command="$1"
+    shift
+    local usage
+    usage="usage: $(basename "$0") $command {start [--wait] | stop} [name]"
+    case "${1:-}" in
+        start) shift; [ "${1:-}" != --wait ] || shift ;;
+        stop)  shift ;;
+        *)     die "$usage" ;;
+    esac
+    [ $# -le 1 ] || die "$usage"
+    case "${1:-}" in -*) die "$usage" ;; esac
+}
+
+# ssh allocates a terminal (-t), so that Ctrl-C stops waiting.
+cmd_trim() {
+    check_start_stop trim "$@"
+    is_running || die "the VM is not running"
+    vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" trim "$@"
+}
+
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
 # LogLevel=ERROR drops the "Connection to ... closed" message that ssh prints at the end when it allocates a terminal.
 cmd_speed_test() {
@@ -325,10 +352,11 @@ case "${1:-}" in
     status)  cmd_status ;;
     ip)      cmd_ip ;;
     disk-status) shift; cmd_disk_status "$@" ;;
+    trim)    shift; cmd_trim "$@" ;;
     speed-test) shift; cmd_speed_test "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
     *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | disk-status [name]" \
-                  "| speed-test [mixed] | ssh [command...] | uninstall}" >&2
+                  "| trim {start [--wait] | stop} [name] | speed-test [mixed] | ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac
