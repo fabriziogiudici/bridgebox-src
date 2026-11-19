@@ -28,6 +28,10 @@ ssh by the BridgeBox command on the Mac.
                                  shows the status of the ZFS pools and of the btrfs filesystems, with all the
                                  details available; with a name, only of that pool, dataset (with its properties)
                                  or btrfs filesystem
+    bridgebox-backend trim {start [--wait] | stop} [name]
+                                 starts (or resumes) the TRIM of the ZFS pools, and trims the btrfs filesystems; with
+                                 --wait, waits until it's finished; 'stop' suspends the TRIM of the ZFS pools; with a
+                                 name, only of that pool or btrfs filesystem
     bridgebox-backend speed-test [--mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
@@ -516,6 +520,63 @@ def disk_status(target=None):
     return 1 if failures else 0
 
 
+def selected_volumes(target):
+    """Returns the imported ZFS pools and the mount points of the btrfs filesystems mounted under MOUNT_ROOT: all of
+    them, or only the one called target (a btrfs filesystem is called by the name of its mount point). Prints an error
+    and returns None if there's none."""
+    pools, points = imported_pools(), btrfs_mounts()
+    if target is not None:
+        pools = [pool for pool in pools if pool == target]
+        points = [point for point in points if os.path.basename(point) == target]
+        if not pools and not points:
+            error(f"there's no imported pool or mounted btrfs filesystem called {target}")
+            return None
+    elif not pools and not points:
+        error("there are no imported pools or mounted btrfs filesystems")
+        return None
+    return pools, points
+
+
+def trim(action, wait, target):
+    """Starts or resumes (start), or suspends (stop), the TRIM of the imported ZFS pools (or only of target): it runs
+    in background in the kernel, and with wait this waits until it's finished. A pool fails if one of its devices
+    doesn't support TRIM (e.g. a LUKS volume opened without discards). The btrfs filesystems mounted under MOUNT_ROOT
+    are trimmed with fstrim, which returns only when it's finished: so they are trimmed by 'start' even without wait
+    (after the ZFS pools have been started), and their TRIM can't be stopped. Returns 1 if something failed."""
+    volumes = selected_volumes(target)
+    if volumes is None:
+        return 1
+    pools, points = volumes
+    failures = 0
+    started = []
+    for pool in pools:
+        if action == "start":
+            log(f"Starting the TRIM of {pool}")
+            if subprocess.run(["zpool", "trim", pool]).returncode == 0:
+                started.append(pool)
+            else:
+                failures += 1
+        else:
+            log(f"Suspending the TRIM of {pool}")
+            failures += subprocess.run(["zpool", "trim", "-s", pool]).returncode != 0
+    try:
+        for point in points:
+            name = os.path.basename(point)
+            if action == "start":
+                log(f"Trimming {name} ({point})")
+                failures += subprocess.run(["fstrim", "-v", point]).returncode != 0
+            else:
+                warn(f"the TRIM of the btrfs filesystem {name} can't be stopped: it runs only during 'trim start'")
+        if wait:
+            for pool in started:
+                log(f"Waiting for the TRIM of {pool}")
+                failures += subprocess.run(["zpool", "wait", "-t", "trim", pool]).returncode != 0
+    except KeyboardInterrupt:
+        error("interrupted: the TRIM of the ZFS pools goes on ('trim stop' suspends it)")
+        return 130
+    return 1 if failures else 0
+
+
 def mount():
     os.makedirs(MOUNT_ROOT, exist_ok=True)
     # The LUKS volumes are opened first, so that the pools and filesystems in them are found.
@@ -560,22 +621,41 @@ def unmount():
     return 1 if failures else 0
 
 
+def parse_start_stop(args):
+    """Parses the arguments of the commands that start or stop a background operation on the disks:
+    {start [--wait] | stop} [name]. Returns (action, wait, name), with name None if missing; or None if the arguments
+    are wrong."""
+    if not args or args[0] not in ("start", "stop"):
+        return None
+    action, rest = args[0], args[1:]
+    wait = action == "start" and rest[:1] == ["--wait"]
+    if wait:
+        rest = rest[1:]
+    if len(rest) > 1 or (rest and rest[0].startswith("-")):
+        return None
+    return action, wait, rest[0] if rest else None
+
+
 def main():
-    commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "speed-test": speed_test}
+    commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim,
+                "speed-test": speed_test}
     valid = (["mount"], ["unmount"], ["speed-test"], ["speed-test", "--mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
-    if command == "disk-status":
+    if command == "trim":
+        args = parse_start_stop(args)
+    elif command == "disk-status":
         args = args if len(args) <= 1 and not (args and args[0].startswith("-")) else None
     elif sys.argv[1:] not in valid:
         args = None
     if args is None:
-        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name] | speed-test [--mixed]}}",
+        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name]"
+              " | trim {start [--wait] | stop} [name] | speed-test [--mixed]}",
               file=sys.stderr)
         return 1
     if os.geteuid() != 0:
         print("ERROR: must run as root", file=sys.stderr)
         return 1
-    return commands[sys.argv[1]](*sys.argv[2:])
+    return commands[command](*args)
 
 
 if __name__ == "__main__":

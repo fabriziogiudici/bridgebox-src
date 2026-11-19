@@ -41,6 +41,7 @@ BridgeBox stop                                 # unmounts the disks and stops th
 BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
 BridgeBox disk-status [name]                   # state of the pools and filesystems
+BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
 BridgeBox speed-test [--mixed]                 # measures the speed of the disks
 BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
 BridgeBox uninstall                            # removes BridgeBox
@@ -95,6 +96,14 @@ filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device sta
 balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its datasets),
 that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem (by the name of
 its mount point), e.g. `disk-status MyVolume/Music`.
+
+`trim start` starts the TRIM of each imported ZFS pool (`zpool trim`), or only of the one given (e.g. `trim start
+MyVolume`; a btrfs filesystem is given by the name of its mount point), which runs in background in the VM, or resumes
+it if it was suspended; with `--wait`, it waits until it's finished (Ctrl-C stops waiting, not the TRIM). `trim stop`
+suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices doesn't support it: e.g. a LUKS volume
+must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the LUKS
+header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim start`
+waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
 
 ### Measuring the speed
 
