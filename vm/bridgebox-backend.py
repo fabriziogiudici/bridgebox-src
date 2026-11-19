@@ -330,8 +330,11 @@ def run_fio(name, directory, *options):
 
 def sequential_test(directory, size_gib):
     """Writes the test file as a copy does (with buffered I/O, including the time to flush it to the disk), then reads
-    back what was written with direct I/O. The caches are dropped in between: otherwise ZFS would serve direct reads
-    of the blocks still in the ARC from memory. Returns the speeds, in bytes per second."""
+    back what was written in the same way, as the Finder or a copy does: through the cache, with the read-ahead of
+    the filesystem. Direct I/O isn't used for reading, since on ZFS it disables the prefetch and blocks on each
+    request, so it would measure the latency of the disk rather than its throughput. The caches are dropped in
+    between, so that the file is read from the disk: on ZFS, part of it may still be in the ARC, but the ARC of the
+    VM is much smaller than the test file. Returns the speeds, in bytes per second."""
     job = run_fio("seq_write", directory, f"--size={size_gib}G", "--rw=write", "--ioengine=psync", "--end_fsync=1")
     write, written = job["write"]["bw_bytes"], job["write"]["io_bytes"]
     if written == 0:
@@ -341,8 +344,7 @@ def sequential_test(directory, size_gib):
         file.write("3\n")
     # Only what was written is read: the run stops after SPEED_TEST_RUNTIME seconds, and the rest of the file would
     # be read from holes, at a speed that means nothing.
-    job = run_fio("seq_read", directory, f"--size={written}", "--rw=read", "--direct=1", "--ioengine=libaio",
-                  "--iodepth=16")
+    job = run_fio("seq_read", directory, f"--size={written}", "--rw=read", "--ioengine=psync")
     return {"write": write, "read": job["read"]["bw_bytes"]}
 
 

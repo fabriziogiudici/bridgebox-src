@@ -93,10 +93,11 @@ VM restarts, since btrfs keeps it in `/var/lib/btrfs`, which is in RAM. The resu
 `speed-test` has the back-end measure with `fio`, in turn, the speed of each pool whose root dataset is mounted and of
 each btrfs filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in
 1 MiB blocks through the cache, including the time to flush it to the disk; then, after dropping the caches, it reads
-back what was written with direct I/O. With `mixed`, it reads and writes at the same time, half and half, with direct
-I/O and 16 requests in flight: this measures the total throughput of the disk under a mixed load, split between the two
-directions. Each run lasts at most 30 seconds; at the end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes,
-as macOS shows them).
+back what was written, through the cache too, as the Finder or a copy does (direct I/O isn't used for reading, since
+on ZFS it disables the read-ahead and would measure the latency of the disk rather than its throughput). With
+`mixed`, it reads and writes at the same time, half and half, with direct I/O and 16 requests in flight: this measures
+the total throughput of the disk under a mixed load, split between the two directions. Each run lasts at most 30
+seconds; at the end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows them).
 
 The test file is 4 GiB; if there isn't enough free space (with a margin of 256 MiB), 2 GiB and then 1 GiB are tried,
 with a warning; if even 1 GiB doesn't fit, an error is reported for that volume and the test goes on with the next one.
