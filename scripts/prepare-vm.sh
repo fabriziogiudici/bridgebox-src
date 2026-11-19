@@ -120,8 +120,9 @@ verify() {
     "$BRIDGEBOX" ssh 'printf "logged in as " && id -un && grep -q " / overlay " /proc/mounts \
         && echo "the root filesystem is an overlay" \
         && uname -r && doas modprobe zfs && doas modprobe btrfs && doas zfs version && btrfs --version \
-        && doas rc-service avahi-daemon status && doas rc-service samba status'
+        && doas rc-service avahi-daemon status'
     "$BRIDGEBOX" ssh "doas $BACKEND unmount && echo 'the back-end runs'"
+    "$BRIDGEBOX" ssh "doas $BACKEND samba start && doas rc-service samba status && doas $BACKEND samba stop"
     shutdown_vm
 }
 
