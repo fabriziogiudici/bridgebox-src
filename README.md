@@ -45,6 +45,7 @@ BridgeBox disk-status [name]                   # state of the pools and filesyst
 BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
 BridgeBox scrub {start [--wait] | stop} [name] # scrub of the pools and filesystems
 BridgeBox speed-test [--mixed]                 # measures the speed of the disks
+BridgeBox {zpool | zfs | btrfs} [argument...]  # runs the command in the VM
 BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
 BridgeBox uninstall                            # removes BridgeBox
 ```
@@ -134,6 +135,13 @@ end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows 
 The test file is 4 GiB; if there isn't enough free space (with a margin of 256 MiB), 2 GiB and then 1 GiB are tried,
 with a warning; if even 1 GiB doesn't fit, an error is reported for that volume and the test goes on with the next one.
 The file is written in a temporary directory in the volume, which is always deleted.
+
+### ZFS and btrfs commands
+
+`zpool`, `zfs` and `btrfs` run the command with the same name in the VM, as root, with the given arguments as they are,
+e.g. `BridgeBox zpool status -v MyVolume` or `BridgeBox zfs list -o space`. The exit status is the command's. A terminal
+is used only when `BridgeBox` runs in one, so that the commands that ask for something (e.g. `zfs load-key`) work, while
+in pipes and scripts the output is the plain one (e.g. `BridgeBox zfs list -H -o name | grep Music`).
 
 
 ## Development

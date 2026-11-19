@@ -39,6 +39,8 @@ ssh by the BridgeBox command on the Mac.
     bridgebox-backend samba {start | stop | status}
                                  starts or stops Samba and its Bonjour announcement (it isn't started at boot), or
                                  shows whether it runs, with the connected clients and the open files
+    bridgebox-backend {zpool | zfs | btrfs} [argument...]
+                                 runs zpool, zfs or btrfs with the given arguments, as they are
     bridgebox-backend speed-test [--mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
@@ -74,6 +76,7 @@ import time
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 AVAHI_SMB_SERVICE = "/etc/avahi/services/smb.service"   # announces the shares with Bonjour
+FORWARDED = ("zpool", "zfs", "btrfs")               # run as they are, with the given arguments
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
 LUKS_PREFIX = "bridgebox-"                          # of the names of the LUKS volumes opened by the back-end
@@ -768,7 +771,9 @@ def main():
     valid = (["mount"], ["unmount"], ["samba", "start"], ["samba", "stop"], ["samba", "status"], ["speed-test"],
              ["speed-test", "--mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
-    if command in ("trim", "scrub"):
+    if command in FORWARDED:
+        pass                        # the arguments are passed as they are
+    elif command in ("trim", "scrub"):
         args = parse_start_stop(args)
     elif command == "disk-status":
         args = args if len(args) <= 1 and not (args and args[0].startswith("-")) else None
@@ -777,11 +782,16 @@ def main():
     if args is None:
         print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name]"
               " | trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]"
-              " | samba {start | stop | status} | speed-test [--mixed]}", file=sys.stderr)
+              " | samba {start | stop | status} | speed-test [--mixed] | {zpool | zfs | btrfs} [argument...]}",
+              file=sys.stderr)
         return 1
     if os.geteuid() != 0:
         print("ERROR: must run as root", file=sys.stderr)
         return 1
+    if command in FORWARDED:
+        # The back-end is replaced by the command: its exit status and its prompts (e.g. 'zfs load-key') are the
+        # command's own.
+        os.execvp(command, [command, *args])
     return commands[command](*args)
 
 

@@ -43,6 +43,8 @@
 #   BridgeBox speed-test [--mixed]
 #                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
 #                       copy does them, then sequential reads; with '--mixed', reads and writes at the same time
+#   BridgeBox {zpool | zfs | btrfs} [argument...]
+#                       runs zpool, zfs or btrfs in the VM, as root, with the given arguments as they are
 #   BridgeBox ssh       opens an ssh session (or runs the given command) in the VM
 #   BridgeBox uninstall removes BridgeBox, when installed by the package (with sudo)
 #
@@ -359,6 +361,16 @@ cmd_samba() {
     vm_ssh -o LogLevel=ERROR doas "$BACKEND" samba "$1"
 }
 
+# Runs zpool, zfs or btrfs in the VM through the back-end. ssh allocates a terminal only when the command is used from
+# a terminal (for prompts such as 'zfs load-key', and so that Ctrl-C stops it): with a terminal, the output would have
+# Windows line endings and the error messages would go to the standard output, which would break pipes and scripts.
+cmd_forward() {
+    local tty=-T
+    [ -t 0 ] && [ -t 1 ] && tty=-t
+    is_running || die "the VM is not running"
+    vm_ssh "$tty" -o LogLevel=ERROR "doas $BACKEND$(quoted "$@")"
+}
+
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
 # LogLevel=ERROR drops the "Connection to ... closed" message that ssh prints at the end when it allocates a terminal.
 cmd_speed_test() {
@@ -398,11 +410,13 @@ case "${1:-}" in
     scrub)   shift; cmd_scrub "$@" ;;
     samba)   shift; cmd_samba "$@" ;;
     speed-test) shift; cmd_speed_test "$@" ;;
+    zpool | zfs | btrfs) cmd_forward "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
     *)       echo "Usage: $(basename "$0") {start [--samba] [disk...] | stop | status | ip" \
                   "| disk-status [name]" \
                   "| trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]" \
-                  "| samba {start | stop | status} | speed-test [--mixed] | ssh [command...] | uninstall}" >&2
+                  "| samba {start | stop | status} | speed-test [--mixed] | {zpool | zfs | btrfs} [argument...]" \
+                  "| ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac
