@@ -40,7 +40,10 @@ STOP_TIMEOUT="${STOP_TIMEOUT:-30}"
 # project; in a private temporary directory when installed (see scripts/build-pkg.sh), since the VM is read-only.
 RUN_DIR="${RUN_DIR:-$VM_DIR}"
 
-SSH_USER=alpine                      # the default user of the Alpine cloud images
+# bin/BridgeBox logs in as SSH_USER, created by scripts/provision.sh; scripts/prepare-vm.sh provisions the VM as
+# PROVISION_USER, the default user of the Alpine cloud images (created by cloud-init), which is kept.
+SSH_USER="${SSH_USER:-bridgebox}"
+PROVISION_USER=alpine
 VFKIT="${VFKIT:-vfkit}"
 DISK="$VM_DIR/disk.raw"
 EFI_VARS="$VM_DIR/efi-vars"

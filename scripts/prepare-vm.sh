@@ -18,8 +18,9 @@
 #
 #   1. downloads the Alpine cloud image (cached in $CACHE_DIR), extracts the disk, creates the ssh key and the
 #      cloud-init files;
-#   2. boots the VM and, with scripts/provision.sh, installs the btrfs and ZFS software, Avahi, which announces the
-#      VM with Bonjour, and Samba, which shares it with the Mac (internet access is needed); installs the back-end
+#   2. boots the VM and, with scripts/provision.sh (as the default user of the image), creates the user that
+#      bin/BridgeBox logs in as, installs the btrfs and ZFS software, Avahi, which announces the VM with Bonjour, and
+#      Samba, which shares it with the Mac (internet access is needed); installs the back-end
 #      (vm/bridgebox-backend.py), which mounts the disks for bin/BridgeBox; then seals the image with scripts/seal.sh,
 #      so that from then on the VM runs from a read-only disk and loses its changes when it stops;
 #   3. boots the sealed VM, to check that it runs from a read-only disk, that the ZFS and btrfs kernel modules load
@@ -94,24 +95,30 @@ shutdown_vm() {
     "$BRIDGEBOX" stop
 }
 
+# Runs as PROVISION_USER: SSH_USER is created by scripts/provision.sh.
 provision() {
-    log "Installing the btrfs and ZFS software"
-    "$BRIDGEBOX" start
-    "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/provision.sh"
-    log "Installing the back-end as $BACKEND"
-    "$BRIDGEBOX" ssh "doas sh -c 'mkdir -p $(dirname "$BACKEND") && cat > $BACKEND && chmod 755 $BACKEND'" \
-        < "$ROOT/vm/bridgebox-backend.py"
-    "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/seal.sh"
-    shutdown_vm
+    (
+        export SSH_USER="$PROVISION_USER"
+        log "Installing the btrfs and ZFS software"
+        "$BRIDGEBOX" start
+        "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/provision.sh"
+        log "Installing the back-end as $BACKEND"
+        "$BRIDGEBOX" ssh "doas sh -c 'mkdir -p $(dirname "$BACKEND") && cat > $BACKEND && chmod 755 $BACKEND'" \
+            < "$ROOT/vm/bridgebox-backend.py"
+        "$BRIDGEBOX" ssh 'doas sh -s' < "$ROOT/scripts/seal.sh"
+        shutdown_vm
+    )
     touch "$SEALED"
 }
 
-# Boots the sealed VM: bin/BridgeBox attaches the disk read-only and finds the VM with Bonjour.
+# Boots the sealed VM: bin/BridgeBox attaches the disk read-only and finds the VM with Bonjour. It logs in as SSH_USER,
+# so this also checks that the user created by scripts/provision.sh can log in and use doas.
 verify() {
     log "Booting the sealed VM to check it"
     "$BRIDGEBOX" start
     log "$MDNS_NAME resolves to $("$BRIDGEBOX" ip)"
-    "$BRIDGEBOX" ssh 'grep -q " / overlay " /proc/mounts && echo "the root filesystem is an overlay" \
+    "$BRIDGEBOX" ssh 'printf "logged in as " && id -un && grep -q " / overlay " /proc/mounts \
+        && echo "the root filesystem is an overlay" \
         && uname -r && doas modprobe zfs && doas modprobe btrfs && doas zfs version && btrfs --version \
         && doas rc-service avahi-daemon status && doas rc-service samba status'
     "$BRIDGEBOX" ssh "doas $BACKEND unmount && echo 'the back-end runs'"

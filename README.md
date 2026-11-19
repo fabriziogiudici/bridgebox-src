@@ -22,7 +22,7 @@ make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in t
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
               # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
               # passphrases are asked for)
-make ssh      # logs in as the 'alpine' user
+make ssh      # logs in as the 'bridgebox' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
 make speed-test # measures with fio the write and read speed of each mounted pool and btrfs filesystem;
@@ -32,8 +32,9 @@ make stop     # unmounts the disks and stops the VM: Stop request first, HardSto
 make clean    # stops and deletes the VM (the Alpine image is kept; 'make distclean' deletes it too)
 ```
 
-`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to install `btrfs-progs`, `zfs` and `zfs-virt`
-(the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and Samba, with
+`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to create the user `bridgebox` and install
+`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi
+and Samba, with
 `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs
 from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the VM with
 Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
@@ -82,11 +83,14 @@ The file is written in a temporary directory in the volume, which is always dele
 Each mounted pool is shared with SMB as a share with the name of the pool (e.g. `smb://bridgebox.local/Clone2`), and
 each btrfs filesystem as a share with the name of its mount point, so that the Mac sees the free space of each one; a
 pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared. The shares are read-write, with
-guest access (files are accessed as root). The VM is announced with Bonjour, so `bridgebox` appears in the sidebar of
-the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and connect as guest. NetBIOS is
-disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags, extended attributes) are
-stored as extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks
-still use `._` files).
+guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so the ones created from the Mac belong
+to `bridgebox:bridgebox`; files and directories with other owners (e.g. written when the shares were accessed as root)
+are only readable from the Mac until they are given to `bridgebox`, e.g. with
+`bin/BridgeBox ssh doas chown -R bridgebox:bridgebox /srv/bridgebox/Clone2`. The VM is announced with Bonjour, so
+`bridgebox` appears in the sidebar of the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and
+connect as guest. NetBIOS is disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info,
+tags, extended attributes) are stored as extended attributes of the files on ZFS or btrfs rather than as AppleDouble
+`._` files (only resource forks still use `._` files).
 
 Files in `target/vm`:
 
