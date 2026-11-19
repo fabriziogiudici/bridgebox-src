@@ -33,6 +33,9 @@
 #                       starts (or resumes) the TRIM of the ZFS pools and trims the btrfs filesystems; with --wait,
 #                       waits until it's finished; 'stop' suspends the TRIM of the ZFS pools; with a name, only of that
 #                       pool or btrfs filesystem
+#   BridgeBox scrub {start [--wait] | stop} [name]
+#                       starts (or resumes) the scrub of the ZFS pools and of the btrfs filesystems; with --wait, waits
+#                       until it's finished; 'stop' pauses it; with a name, only of that pool or btrfs filesystem
 #   BridgeBox speed-test [mixed]
 #                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
 #                       copy does them, then sequential reads; with 'mixed', reads and writes at the same time
@@ -310,11 +313,17 @@ check_start_stop() {
     case "${1:-}" in -*) die "$usage" ;; esac
 }
 
-# ssh allocates a terminal (-t), so that Ctrl-C stops waiting.
+# ssh allocates a terminal (-t) to the commands that can wait, so that Ctrl-C stops waiting.
 cmd_trim() {
     check_start_stop trim "$@"
     is_running || die "the VM is not running"
     vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" trim "$@"
+}
+
+cmd_scrub() {
+    check_start_stop scrub "$@"
+    is_running || die "the VM is not running"
+    vm_ssh -t -o LogLevel=ERROR doas "$BACKEND" scrub "$@"
 }
 
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
@@ -353,10 +362,12 @@ case "${1:-}" in
     ip)      cmd_ip ;;
     disk-status) shift; cmd_disk_status "$@" ;;
     trim)    shift; cmd_trim "$@" ;;
+    scrub)   shift; cmd_scrub "$@" ;;
     speed-test) shift; cmd_speed_test "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
     *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | disk-status [name]" \
-                  "| trim {start [--wait] | stop} [name] | speed-test [mixed] | ssh [command...] | uninstall}" >&2
+                  "| trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]" \
+                  "| speed-test [mixed] | ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac

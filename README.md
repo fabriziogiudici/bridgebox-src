@@ -39,7 +39,7 @@ and Samba, with
 from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the VM with
 Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly
 (`bin/BridgeBox start [disk...] | stop | status | ip | disk-status [name] | trim {start [--wait] | stop} [name] |
-speed-test [mixed] | ssh [command...]`). Settings shared by the two scripts are in
+scrub {start [--wait] | stop} [name] | speed-test [mixed] | ssh [command...]`). Settings shared by the two scripts are in
 `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
@@ -83,6 +83,12 @@ suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices do
 must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the
 LUKS header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim
 start` waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
+
+`scrub start` starts the scrub of each imported ZFS pool (`zpool scrub`) and of each mounted btrfs filesystem (`btrfs
+scrub start`), or only of the one given (e.g. `scrub start Clone2`), which run in background in the VM; with `--wait`, it waits until they are finished (Ctrl-C stops
+waiting, not the scrub). `scrub stop` pauses them (`zpool scrub -p`, `btrfs scrub cancel`); the next `scrub start`
+resumes them from where they were: always for ZFS, which keeps the progress in the pool, but for btrfs only until the
+VM restarts, since btrfs keeps it in `/var/lib/btrfs`, which is in RAM. The results are shown by `disk-status`.
 
 `speed-test` has the back-end measure with `fio`, in turn, the speed of each pool whose root dataset is mounted and of
 each btrfs filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in

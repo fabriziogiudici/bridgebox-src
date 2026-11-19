@@ -32,6 +32,10 @@ ssh by the BridgeBox command on the Mac.
                                  starts (or resumes) the TRIM of the ZFS pools, and trims the btrfs filesystems; with
                                  --wait, waits until it's finished; 'stop' suspends the TRIM of the ZFS pools; with a
                                  name, only of that pool or btrfs filesystem
+    bridgebox-backend scrub {start [--wait] | stop} [name]
+                                 starts (or resumes) the scrub of the ZFS pools and of the btrfs filesystems; with
+                                 --wait, waits until it's finished; 'stop' pauses it; with a name, only of that pool
+                                 or btrfs filesystem
     bridgebox-backend speed-test [mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with 'mixed', reads and
@@ -62,12 +66,14 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
 LUKS_PREFIX = "bridgebox-"                          # of the names of the LUKS volumes opened by the back-end
+SCRUB_POLL_SECONDS = 10                             # how often --wait checks the scrub of a btrfs filesystem
 SPEED_TEST_SIZES_GIB = (4, 2, 1)                    # sizes of the test file, tried in turn until one fits
 SPEED_TEST_MARGIN = 256 * 1024 ** 2                 # bytes that must be left free besides the test file
 SPEED_TEST_RUNTIME = 30                             # seconds, at most, of each fio run
@@ -575,6 +581,73 @@ def trim(action, wait, target):
     return 1 if failures else 0
 
 
+def btrfs_scrub_start(point):
+    """Resumes the scrub of a btrfs filesystem, if it was stopped since the VM started (btrfs keeps the progress in
+    /var/lib/btrfs, which is in RAM), otherwise starts a new one; returns True if it's running. btrfs runs the scrub
+    in a child process: it's started in a session of its own, so that it isn't killed when the ssh session ends."""
+    result = subprocess.run(["btrfs", "scrub", "resume", point], capture_output=True, text=True,
+                            start_new_session=True)
+    if result.returncode == 2:      # nothing to resume
+        result = subprocess.run(["btrfs", "scrub", "start", point], capture_output=True, text=True,
+                                start_new_session=True)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode == 0
+
+
+def btrfs_scrub_running(point):
+    status = subprocess.run(["btrfs", "scrub", "status", point], capture_output=True, text=True).stdout
+    return re.search(r"^Status:\s+running\s*$", status, re.MULTILINE) is not None
+
+
+def scrub(action, wait, target):
+    """Starts or resumes (start), or pauses (stop), the scrub of the imported ZFS pools and of the btrfs filesystems
+    mounted under MOUNT_ROOT (or only of target): it runs in background, and with wait this waits until it's
+    finished. A paused ZFS scrub is resumed by the next start, even after the VM restarts; a stopped btrfs scrub only
+    until the VM restarts. Returns 1 if something failed."""
+    volumes = selected_volumes(target)
+    if volumes is None:
+        return 1
+    pools, points = volumes
+    failures = 0
+    started_pools, started_points = [], []
+    for pool in pools:
+        if action == "start":
+            log(f"Starting the scrub of {pool}")
+            if subprocess.run(["zpool", "scrub", pool]).returncode == 0:
+                started_pools.append(pool)
+            else:
+                failures += 1
+        else:
+            log(f"Pausing the scrub of {pool}")
+            failures += subprocess.run(["zpool", "scrub", "-p", pool]).returncode != 0
+    for point in points:
+        name = os.path.basename(point)
+        if action == "start":
+            log(f"Starting the scrub of {name} ({point})")
+            if btrfs_scrub_start(point):
+                started_points.append(point)
+            else:
+                failures += 1
+        else:
+            log(f"Stopping the scrub of {name} ({point})")
+            failures += subprocess.run(["btrfs", "scrub", "cancel", point]).returncode != 0
+    if wait:
+        try:
+            for pool in started_pools:
+                log(f"Waiting for the scrub of {pool}")
+                failures += subprocess.run(["zpool", "wait", "-t", "scrub", pool]).returncode != 0
+            for point in started_points:
+                log(f"Waiting for the scrub of {os.path.basename(point)}")
+                while btrfs_scrub_running(point):
+                    time.sleep(SCRUB_POLL_SECONDS)
+        except KeyboardInterrupt:
+            error("interrupted: the scrub goes on ('scrub stop' pauses it)")
+            return 130
+        log("Finished: 'disk-status' shows the results")
+    return 1 if failures else 0
+
+
 def mount():
     os.makedirs(MOUNT_ROOT, exist_ok=True)
     # The LUKS volumes are opened first, so that the pools and filesystems in them are found.
@@ -635,11 +708,11 @@ def parse_start_stop(args):
 
 
 def main():
-    commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim,
+    commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim, "scrub": scrub,
                 "speed-test": speed_test}
     valid = (["mount"], ["unmount"], ["speed-test"], ["speed-test", "mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
-    if command == "trim":
+    if command in ("trim", "scrub"):
         args = parse_start_stop(args)
     elif command == "disk-status":
         args = args if len(args) <= 1 and not (args and args[0].startswith("-")) else None
@@ -647,7 +720,7 @@ def main():
         args = None
     if args is None:
         print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name]"
-              " | trim {start [--wait] | stop} [name] | speed-test [mixed]}",
+              " | trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name] | speed-test [mixed]}",
               file=sys.stderr)
         return 1
     if os.geteuid() != 0:
