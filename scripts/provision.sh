@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Runs as root inside the VM (sent by scripts/prepare-vm.sh): installs the btrfs and ZFS software, Avahi to announce
-# the VM with Bonjour, and Samba to share it with the Mac. It can be run more than once.
+# Runs as root inside the VM (sent by scripts/prepare-vm.sh): creates the user bridgebox, installs the btrfs and ZFS
+# software, Avahi to announce the VM with Bonjour, and Samba to share it with the Mac. It can be run more than once.
 #
 set -eu
 
@@ -53,11 +53,55 @@ for service in dbus avahi-daemon; do
     [ -e "/etc/runlevels/default/$service" ] || rc-update add "$service" default
 done
 
+# The user bridgebox: bin/BridgeBox logs in as it, and Samba accesses the shared files as it. It's created here, rather
+# than by cloud-init, as a copy of the default user 'alpine' (which is kept, and is used by scripts/prepare-vm.sh to
+# run this script): the same password field (locked: only the ssh key works), so that sshd treats the two users the
+# same way, the same authorized ssh key, and doas without password. The UID and GID are fixed, since the files on the
+# disks keep the numeric owner.
+BRIDGEBOX_ID=1100
+echo "==> Creating the user bridgebox"
+grep -q '^bridgebox:' /etc/group || addgroup -g "$BRIDGEBOX_ID" bridgebox
+id bridgebox > /dev/null 2>&1 || adduser -D -u "$BRIDGEBOX_ID" -G bridgebox -g BridgeBox -s /bin/ash bridgebox
+if [ "$(id -u bridgebox)" != "$BRIDGEBOX_ID" ] || [ "$(id -g bridgebox)" != "$BRIDGEBOX_ID" ]; then
+    echo "ERROR: the user bridgebox exists, but its UID or GID isn't $BRIDGEBOX_ID" >&2
+    exit 1
+fi
+password="$(awk -F: '$1 == "alpine" { print $2 }' /etc/shadow)"
+if [ -z "$password" ]; then
+    echo "ERROR: the user alpine has no password field in /etc/shadow" >&2
+    exit 1
+fi
+(
+    umask 077
+    awk -F: -v OFS=: -v password="$password" '$1 == "bridgebox" { $2 = password } { print }' /etc/shadow \
+        > /etc/shadow.new
+)
+cat /etc/shadow.new > /etc/shadow   # keeps the owner and the mode of /etc/shadow
+rm /etc/shadow.new
+alpine_home="$(awk -F: '$1 == "alpine" { print $6 }' /etc/passwd)"
+install -d -m 700 -o bridgebox -g bridgebox /home/bridgebox/.ssh
+install -m 600 -o bridgebox -g bridgebox "$alpine_home/.ssh/authorized_keys" /home/bridgebox/.ssh/authorized_keys
+# The doas of Alpine reads only /etc/doas.d/*.conf when that directory exists, otherwise /etc/doas.conf (where
+# cloud-init writes the rule of 'alpine'): the rule goes where it's read, and is checked.
+rule="permit nopass bridgebox"
+if [ -d /etc/doas.d ]; then
+    echo "$rule" > /etc/doas.d/bridgebox.conf
+    chmod 600 /etc/doas.d/bridgebox.conf
+elif ! grep -qx "$rule" /etc/doas.conf; then
+    echo "$rule" >> /etc/doas.conf
+fi
+if ! su -s /bin/sh bridgebox -c 'doas -n true'; then
+    echo "ERROR: the user bridgebox can't use doas" >&2
+    exit 1
+fi
+
 # Samba shares each ZFS pool and each btrfs filesystem mounted by the back-end under /srv/bridgebox as a share of its
 # own, so that the Mac sees the real free space of each one. The shares are written by the back-end in
 # bridgebox-shares.conf, which is empty in the image. They are read-write, to guests: they are reachable only from the
-# Mac. Files are accessed as root, so that nothing is hidden by permissions. NetBIOS is disabled (nmbd isn't started,
-# no port 139): the Mac finds the VM with Bonjour and connects on port 445.
+# Mac. Files are accessed as the user bridgebox (force user and force group), so the ones created from the Mac belong
+# to bridgebox:bridgebox; files and directories with other owners are only readable, unless they are made bridgebox's
+# (chown). NetBIOS is disabled (nmbd isn't started, no port 139): the Mac finds the VM with Bonjour and connects on
+# port 445.
 echo "==> Installing Samba"
 apk add samba
 mkdir -p /srv/bridgebox
@@ -105,7 +149,8 @@ cat > /etc/samba/smb.conf << 'EOF'
    read only = no
    guest ok = yes
    guest only = yes
-   force user = root
+   force user = bridgebox
+   force group = bridgebox
    # macOS metadata (Finder info, tags, extended attributes) are stored as extended attributes of the files,
    # instead of AppleDouble ._ files.
    vfs objects = catia fruit streams_xattr

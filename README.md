@@ -68,7 +68,7 @@ VM, forcing it off if it doesn't react. If the disks can't be unmounted (for ins
 share is still connected from the Finder), the VM is left running.
 
 `status` shows the state of the VM as reported by vfkit, and `ip` its IP address. `ssh` logs in to the VM as the user
-`alpine`, who can run commands as root with `doas`; with a command, it runs it, e.g. `BridgeBox ssh doas getfattr -d
+`bridgebox`, who can run commands as root with `doas`; with a command, it runs it, e.g. `BridgeBox ssh doas getfattr -d
 -m - /srv/bridgebox/MyVolume/file`. The VM runs from a read-only image: whatever is written in it, outside the disks, is
 lost when it stops.
 
@@ -77,8 +77,11 @@ lost when it stops.
 Each mounted pool is shared with SMB as a share with the name of the pool (e.g. `smb://bridgebox.local/MyVolume`), and
 each btrfs filesystem as a share with the name of its mount point, so that the Mac sees the free space of each one; a
 pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared. The shares are read-write, with
-guest access. Files are accessed as root. The VM is announced with Bonjour, so `bridgebox` appears in the sidebar of the
-Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and connect as guest. NetBIOS is disabled.
+guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so the ones created from the Mac belong to
+`bridgebox:bridgebox`; files and directories with other owners (e.g. written when the shares were accessed as root) are
+only readable from the Mac until they are given to `bridgebox`, e.g. with `BridgeBox ssh doas chown -R
+bridgebox:bridgebox /srv/bridgebox/MyVolume`. The VM is announced with Bonjour, so `bridgebox` appears in the sidebar of
+the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and connect as guest. NetBIOS is disabled.
 Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags, extended attributes) are stored as
 extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks still use
 `._` files).
@@ -106,7 +109,7 @@ make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in t
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
               # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
               # passphrases are asked for)
-make ssh      # logs in as the 'alpine' user
+make ssh      # logs in as the 'bridgebox' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
 make speed-test # measures with fio the write and read speed of each mounted pool and btrfs filesystem
@@ -115,13 +118,13 @@ make stop     # unmounts the disks and stops the VM: Stop request first, HardSto
 make clean    # stops and deletes the VM (the Alpine image is kept; 'make distclean' deletes it too)
 ```
 
-`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to install `btrfs-progs`, `zfs` and `zfs-virt` (the
-ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and Samba, with `scripts/provision.sh`, and
-seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs from a read-only disk, that
-the kernel modules load, that Samba is running and that the Mac can resolve the VM with Bonjour. This step needs
-internet access; if it fails, `make image` resumes from the step that failed. The other targets run `bin/BridgeBox`,
-which can also be invoked directly, with all the commands of [Usage](#usage). Settings shared by the two scripts are in
-`scripts/config.sh`.
+`make image` runs `scripts/prepare-vm.sh`, which boots the VM once to create the user `bridgebox` and install
+`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and
+Samba, with `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check
+that it runs from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the
+VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other
+targets run `bin/BridgeBox`, which can also be invoked directly, with all the commands of [Usage](#usage). Settings
+shared by the two scripts are in `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
 disk is used as it comes in the Alpine image, without resizing.
