@@ -40,6 +40,7 @@ BridgeBox start [disk...]                      # starts the VM and mounts the di
 BridgeBox stop                                 # unmounts the disks and stops the VM
 BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
+BridgeBox disk-status [name]                   # state of the pools and filesystems
 BridgeBox speed-test [--mixed]                 # measures the speed of the disks
 BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
 BridgeBox uninstall                            # removes BridgeBox
@@ -85,6 +86,15 @@ the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` an
 Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags, extended attributes) are stored as
 extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks still use
 `._` files).
+
+### Checking and maintaining the disks
+
+`disk-status` shows, for each imported ZFS pool, `zpool status -v -t -i -s -D` (errors, TRIM, initialization, slow I/O
+operations, deduplication), `zpool list -v` and the `autotrim` and `freeing` properties; for each mounted btrfs
+filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device stats`, `btrfs scrub status` and `btrfs
+balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its datasets),
+that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem (by the name of
+its mount point), e.g. `disk-status MyVolume/Music`.
 
 ### Measuring the speed
 

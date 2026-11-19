@@ -24,6 +24,10 @@ ssh by the BridgeBox command on the Mac.
                                  filesystem with Samba
     bridgebox-backend unmount    stops sharing, unmounts the btrfs filesystems, exports the ZFS pools (which unmounts
                                  them and unloads their keys) and closes the LUKS volumes
+    bridgebox-backend disk-status [name]
+                                 shows the status of the ZFS pools and of the btrfs filesystems, with all the
+                                 details available; with a name, only of that pool, dataset (with its properties)
+                                 or btrfs filesystem
     bridgebox-backend speed-test [--mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
@@ -459,6 +463,59 @@ def close_luks():
     return failures
 
 
+def run_shown(*command):
+    """Runs a command after printing it; returns its exit status."""
+    print(f"$ {' '.join(command)}", flush=True)
+    return subprocess.run(command).returncode
+
+
+def disk_status(target=None):
+    """Shows the status of the imported ZFS pools and of the btrfs filesystems mounted under MOUNT_ROOT, with all the
+    details available. With target, only of that pool (with the space used by its datasets), dataset (with the
+    status of its pool, and its properties) or btrfs filesystem. Returns 1 if a command failed, or if there's nothing
+    called target."""
+    dataset = None
+    if target is None:
+        pools, points = imported_pools(), btrfs_mounts()
+        if not pools and not points:
+            log("There are no imported pools or mounted btrfs filesystems")
+            return 0
+    elif "/" in target:
+        pool = target.split("/", 1)[0]
+        exists = subprocess.run(["zfs", "list", "-H", "-o", "name", target], capture_output=True).returncode == 0
+        if pool not in imported_pools() or not exists:
+            error(f"there's no dataset called {target} in the imported pools")
+            return 1
+        pools, points, dataset = [pool], [], target
+    else:
+        volumes = selected_volumes(target)
+        if volumes is None:
+            return 1
+        pools, points = volumes
+    failures = 0
+    for pool in pools:
+        print(flush=True)
+        log(f"ZFS pool {pool}")
+        # -v: files with errors; -t: TRIM; -i: initialization; -s: slow I/O operations; -D: deduplication table.
+        failures += run_shown("zpool", "status", "-v", "-t", "-i", "-s", "-D", pool) != 0
+        failures += run_shown("zpool", "list", "-v", pool) != 0
+        failures += run_shown("zpool", "get", "autotrim,freeing", pool) != 0
+        if target is not None:
+            failures += run_shown("zfs", "list", "-r", "-o", "space", dataset or pool) != 0
+    if dataset is not None:
+        print(flush=True)
+        log(f"ZFS dataset {dataset}")
+        failures += run_shown("zfs", "get", "all", dataset) != 0
+    for point in points:
+        print(flush=True)
+        log(f"btrfs filesystem {os.path.basename(point)} ({point})")
+        for command in (("filesystem", "show"), ("filesystem", "usage"), ("device", "stats"), ("scrub", "status")):
+            failures += run_shown("btrfs", *command, point) != 0
+        # It exits with 1 when a balance is running or paused, which isn't a failure.
+        failures += run_shown("btrfs", "balance", "status", point) not in (0, 1)
+    return 1 if failures else 0
+
+
 def mount():
     os.makedirs(MOUNT_ROOT, exist_ok=True)
     # The LUKS volumes are opened first, so that the pools and filesystems in them are found.
@@ -504,9 +561,16 @@ def unmount():
 
 
 def main():
-    commands = {"mount": mount, "unmount": unmount, "speed-test": speed_test}
-    if sys.argv[1:] not in (["mount"], ["unmount"], ["speed-test"], ["speed-test", "--mixed"]):
-        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | speed-test [--mixed]}}", file=sys.stderr)
+    commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "speed-test": speed_test}
+    valid = (["mount"], ["unmount"], ["speed-test"], ["speed-test", "--mixed"])
+    command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
+    if command == "disk-status":
+        args = args if len(args) <= 1 and not (args and args[0].startswith("-")) else None
+    elif sys.argv[1:] not in valid:
+        args = None
+    if args is None:
+        print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name] | speed-test [--mixed]}}",
+              file=sys.stderr)
         return 1
     if os.geteuid() != 0:
         print("ERROR: must run as root", file=sys.stderr)
