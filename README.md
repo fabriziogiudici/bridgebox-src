@@ -36,10 +36,11 @@ Everything is done with the `BridgeBox` command (from the sources, `bin/BridgeBo
 [Development](#development)):
 
 ```shell
-BridgeBox start [disk...]                      # starts the VM and mounts the disks
+BridgeBox start [--samba] [disk...]            # starts the VM, mounts the disks and starts the sharing services
 BridgeBox stop                                 # unmounts the disks and stops the VM
 BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
+BridgeBox samba {start | stop | status}        # shares the disks with SMB
 BridgeBox disk-status [name]                   # state of the pools and filesystems
 BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
 BridgeBox scrub {start [--wait] | stop} [name] # scrub of the pools and filesystems
@@ -56,7 +57,8 @@ in `/tmp/bridgebox-<uid>/`.
 `start` starts the VM in background and waits until it's reachable with ssh. The disks are given as the identifiers of
 their partitions, as `diskutil list` shows them, e.g. `BridgeBox start disk10s2 disk8s2`. A partition must not be
 mounted by macOS (unmount it with `diskutil unmount`); if the user can't access it, `sudo` asks for the password to give
-it to the user. Disks can't be added to a running VM: it must be stopped first.
+it to the user. Disks can't be added to a running VM: `start` with a running VM only starts the sharing services, and
+the VM must be stopped first. `--samba` starts Samba, which can also be started later with `samba start`.
 
 The VM first opens the LUKS volumes found on the partitions, asking for their passphrases (three attempts); then it
 imports all the ZFS pools found on the partitions and in the LUKS volumes, asks for the passphrase of each encryption
@@ -68,7 +70,7 @@ the subvolumes are visible as directories. A btrfs filesystem with missing devic
 
 `stop` stops sharing, unmounts the btrfs filesystems, exports the pools and closes the LUKS volumes; then it stops the
 VM, forcing it off if it doesn't react. If the disks can't be unmounted (for instance, when a file is still open, or a
-share is still connected from the Finder), the VM is left running.
+share is still connected from the Finder), the VM is left running: `samba status` shows the open files.
 
 `status` shows the state of the VM as reported by vfkit, and `ip` its IP address. `ssh` logs in to the VM as the user
 `bridgebox`, who can run commands as root with `doas`; with a command, it runs it, e.g. `BridgeBox ssh doas getfattr -d
@@ -77,17 +79,22 @@ lost when it stops.
 
 ### Sharing with Samba
 
-Each mounted pool is shared with SMB as a share with the name of the pool (e.g. `smb://bridgebox.local/MyVolume`), and
-each btrfs filesystem as a share with the name of its mount point, so that the Mac sees the free space of each one; a
-pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared. The shares are read-write, with
-guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so the ones created from the Mac belong to
-`bridgebox:bridgebox`; files and directories with other owners (e.g. written when the shares were accessed as root) are
-only readable from the Mac until they are given to `bridgebox`, e.g. with `BridgeBox ssh doas chown -R
-bridgebox:bridgebox /srv/bridgebox/MyVolume`. The VM is announced with Bonjour, so `bridgebox` appears in the sidebar of
-the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and connect as guest. NetBIOS is disabled.
-Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags, extended attributes) are stored as
-extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._` files (only resource forks still use
-`._` files).
+Samba isn't started at boot: `samba start` starts it and announces it with Bonjour, until the VM restarts; `samba stop`
+removes the announcement and stops Samba, so that the Mac doesn't see the shares anymore (a Mac that is connected loses
+them). `samba status` shows whether Samba runs and is announced, and, with `smbstatus`, the connected clients, the
+shares in use and the open files (useful when `stop` can't export a pool because a file is still open).
+
+When Samba runs, each mounted pool is shared with SMB as a share with the name of the pool (e.g.
+`smb://bridgebox.local/MyVolume`), and each btrfs filesystem as a share with the name of its mount point, so that the
+Mac sees the free space of each one; a pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't
+shared. The shares are read-write, with guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so
+the ones created from the Mac belong to `bridgebox:bridgebox`; files and directories with other owners (e.g. written
+when the shares were accessed as root) are only readable from the Mac until they are given to `bridgebox`, e.g. with
+`BridgeBox ssh doas chown -R bridgebox:bridgebox /srv/bridgebox/MyVolume`. While Samba runs, the VM is announced with
+Bonjour, so `bridgebox` appears in the sidebar of the Finder; otherwise use Go > Connect to Server with
+`smb://bridgebox.local` and connect as guest. NetBIOS is disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS
+metadata (Finder info, tags, extended attributes) are stored as extended attributes of the files on ZFS or btrfs rather
+than as AppleDouble `._` files (only resource forks still use `._` files).
 
 ### Checking and maintaining the disks
 
@@ -135,7 +142,7 @@ The file is written in a temporary directory in the volume, which is always dele
 make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
               # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
-              # passphrases are asked for)
+              # passphrases are asked for); SHARING="--samba" starts Samba
 make ssh      # logs in as the 'bridgebox' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
@@ -148,10 +155,10 @@ make clean    # stops and deletes the VM (the Alpine image is kept; 'make distcl
 `make image` runs `scripts/prepare-vm.sh`, which boots the VM once to create the user `bridgebox` and install
 `btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and
 Samba, with `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check
-that it runs from a read-only disk, that the kernel modules load, that Samba is running and that the Mac can resolve the
-VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The other
-targets run `bin/BridgeBox`, which can also be invoked directly, with all the commands of [Usage](#usage). Settings
-shared by the two scripts are in `scripts/config.sh`.
+that it runs from a read-only disk, that the kernel modules load, that Samba can be started and stopped and that the Mac
+can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that
+failed. The other targets run `bin/BridgeBox`, which can also be invoked directly, with all the commands of
+[Usage](#usage). Settings shared by the two scripts are in `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
 disk is used as it comes in the Alpine image, without resizing.

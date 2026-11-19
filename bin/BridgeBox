@@ -16,11 +16,12 @@
 #
 # Controls the BridgeBox VM with vfkit (Apple Virtualization.framework).
 #
-#   BridgeBox start [disk...]
+#   BridgeBox start [--samba] [disk...]
 #                       starts the VM in background, with the given partitions (e.g. disk10s2, as shown by 'diskutil
 #                       list' or scripts/detect-partitions.sh) as additional disks, and waits until it's reachable over
 #                       ssh; if partitions were given, opens the LUKS volumes and mounts the ZFS pools and btrfs
-#                       filesystems found on them under /srv/bridgebox
+#                       filesystems found on them under /srv/bridgebox; with --samba, starts Samba (also if the VM
+#                       is already running)
 #   BridgeBox stop      unmounts the disks, closes the LUKS volumes and stops the VM (Stop, then HardStop if the guest
 #                       doesn't react)
 #   BridgeBox status    prints the VM state as reported by vfkit
@@ -36,6 +37,9 @@
 #   BridgeBox scrub {start [--wait] | stop} [name]
 #                       starts (or resumes) the scrub of the ZFS pools and of the btrfs filesystems; with --wait, waits
 #                       until it's finished; 'stop' pauses it; with a name, only of that pool or btrfs filesystem
+#   BridgeBox samba {start | stop | status}
+#                       starts or stops Samba and its Bonjour announcement in the VM (it isn't started at boot), or
+#                       shows whether it runs, with the connected clients and the open files
 #   BridgeBox speed-test [--mixed]
 #                       measures with fio the speed of each mounted pool and btrfs filesystem: sequential writes as a
 #                       copy does them, then sequential reads; with '--mixed', reads and writes at the same time
@@ -148,19 +152,37 @@ vm_ssh() {
         -o ConnectTimeout=5 "$SSH_USER@$ip" "$@"
 }
 
+# Starts the sharing services given ('samba') in the VM.
+start_sharing() {
+    local service
+    for service in "$@"; do
+        vm_ssh -o LogLevel=ERROR doas "$BACKEND" "$service" start || warn "$service could not be started"
+    done
+}
+
 cmd_start() {
+    local arg disks=() sharing=()
+    for arg in "$@"; do
+        case "$arg" in
+            --samba) sharing+=(samba) ;;
+            -*)      die "usage: $(basename "$0") start [--samba] [disk...]" ;;
+            *)       disks+=("$arg") ;;
+        esac
+    done
+
     need "$VFKIT" curl ssh diskutil plutil sudo dscacheutil
     check_paths
     [ -f "$DISK" ] || die "the VM has not been prepared: run 'make image' first"
 
     if is_running; then
         log "The VM is already running"
-        [ $# -eq 0 ] || warn "disks can't be added to a running VM: stop it first"
+        [ ${#disks[@]} -eq 0 ] || warn "disks can't be added to a running VM: stop it first"
+        start_sharing ${sharing[@]+"${sharing[@]}"}
         return
     fi
 
     local disk disk_args=()
-    for disk in "$@"; do
+    for disk in ${disks[@]+"${disks[@]}"}; do
         prepare_data_disk "$disk"
         disk_args+=(--device "virtio-blk,path=/dev/$disk,type=dev")
     done
@@ -213,10 +235,14 @@ cmd_start() {
 
     log "The VM is running at $ip ('BridgeBox ssh' to log in)"
 
+    # The sharing services are started before the disks are mounted: the back-end adds the shares of the mounted
+    # volumes to the running services, and reports them.
+    start_sharing ${sharing[@]+"${sharing[@]}"}
+
     # The back-end in the VM opens the LUKS volumes found on the disks, then mounts the ZFS pools and the btrfs
     # filesystems found on the disks and in the LUKS volumes under /srv/bridgebox, asking for the passphrases of the
     # LUKS volumes and of the encrypted pools: ssh allocates a terminal (-t) for that.
-    if [ $# -gt 0 ]; then
+    if [ ${#disks[@]} -gt 0 ]; then
         vm_ssh -t doas "$BACKEND" mount || warn "not all the filesystems on the disks could be mounted"
     fi
 }
@@ -326,6 +352,13 @@ cmd_scrub() {
     vm_ssh -t -o LogLevel=ERROR "doas $BACKEND scrub$(quoted "$@")"
 }
 
+cmd_samba() {
+    [ $# -eq 1 ] && [[ "$1" =~ ^(start|stop|status)$ ]] \
+        || die "usage: $(basename "$0") samba {start | stop | status}"
+    is_running || die "the VM is not running"
+    vm_ssh -o LogLevel=ERROR doas "$BACKEND" samba "$1"
+}
+
 # The back-end runs fio on each mounted volume in turn. ssh allocates a terminal (-t), so that Ctrl-C stops fio too;
 # LogLevel=ERROR drops the "Connection to ... closed" message that ssh prints at the end when it allocates a terminal.
 cmd_speed_test() {
@@ -363,11 +396,13 @@ case "${1:-}" in
     disk-status) shift; cmd_disk_status "$@" ;;
     trim)    shift; cmd_trim "$@" ;;
     scrub)   shift; cmd_scrub "$@" ;;
+    samba)   shift; cmd_samba "$@" ;;
     speed-test) shift; cmd_speed_test "$@" ;;
     ssh)     shift; vm_ssh "$@" ;;
     uninstall) cmd_uninstall ;;
-    *)       echo "Usage: $(basename "$0") {start [disk...] | stop | status | ip | disk-status [name]" \
+    *)       echo "Usage: $(basename "$0") {start [--samba] [disk...] | stop | status | ip" \
+                  "| disk-status [name]" \
                   "| trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]" \
-                  "| speed-test [--mixed] | ssh [command...] | uninstall}" >&2
+                  "| samba {start | stop | status} | speed-test [--mixed] | ssh [command...] | uninstall}" >&2
              exit 1 ;;
 esac

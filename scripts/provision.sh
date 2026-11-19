@@ -171,10 +171,13 @@ if ! grep -q '^daemon_list="smbd"$' "$conf"; then
     echo "ERROR: unexpected format of $conf" >&2
     exit 1
 fi
-[ -e /etc/runlevels/default/samba ] || rc-update add samba default
+# Samba isn't started at boot: 'BridgeBox samba start' (or 'BridgeBox start --samba') starts it.
+[ ! -e /etc/runlevels/default/samba ] || rc-update del samba default
 
-# Announces the SMB share with Bonjour, so the VM appears in the sidebar of the Finder.
-cat > /etc/avahi/services/smb.service << 'EOF'
+# The Bonjour announcement of the SMB shares, which makes the VM appear in the sidebar of the Finder, is installed
+# disabled (.off): the back-end enables it when it starts Samba.
+rm -f /etc/avahi/services/smb.service
+cat > /etc/avahi/services/smb.service.off << 'EOF'
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>

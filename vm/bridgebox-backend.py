@@ -36,6 +36,9 @@ ssh by the BridgeBox command on the Mac.
                                  starts (or resumes) the scrub of the ZFS pools and of the btrfs filesystems; with
                                  --wait, waits until it's finished; 'stop' pauses it; with a name, only of that pool
                                  or btrfs filesystem
+    bridgebox-backend samba {start | stop | status}
+                                 starts or stops Samba and its Bonjour announcement (it isn't started at boot), or
+                                 shows whether it runs, with the connected clients and the open files
     bridgebox-backend speed-test [--mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
@@ -70,6 +73,7 @@ import time
 
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
+AVAHI_SMB_SERVICE = "/etc/avahi/services/smb.service"   # announces the shares with Bonjour
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
 LUKS_PREFIX = "bridgebox-"                          # of the names of the LUKS volumes opened by the back-end
@@ -263,9 +267,11 @@ def update_shares(excluded=()):
         shared.append(name)
     with open(SHARES_CONF, "w") as file:
         file.write("\n".join(lines))
-    result = subprocess.run(["smbcontrol", "smbd", "reload-config"], capture_output=True, text=True)
-    if result.returncode != 0:
-        warn(f"Samba didn't reload its configuration: {(result.stderr or result.stdout).strip()}")
+    # If Samba has been stopped ('samba stop'), it reads the configuration when it's started again.
+    if smbd_running():
+        result = subprocess.run(["smbcontrol", "smbd", "reload-config"], capture_output=True, text=True)
+        if result.returncode != 0:
+            warn(f"Samba didn't reload its configuration: {(result.stderr or result.stdout).strip()}")
     return shared
 
 
@@ -650,6 +656,54 @@ def scrub(action, wait, target):
     return 1 if failures else 0
 
 
+def report_sharing(shares):
+    """Logs how the mounted volumes are shared: the Samba shares are written also when Samba is stopped, so that they
+    are ready when it's started."""
+    host = socket.gethostname()
+    if shares and smbd_running():
+        for name in shares:
+            log(f"Shared {name} with SMB as smb://{host}.local/{name}")
+    elif shares:
+        log(f"Samba is stopped: {', '.join(shares)} will be shared with SMB when it's started ('samba start')")
+
+
+def smbd_running():
+    return subprocess.run(["pidof", "smbd"], capture_output=True).returncode == 0
+
+
+def samba(action):
+    """start: starts Samba and announces it with Bonjour; stop: removes the announcement and stops Samba, so that the
+    Mac doesn't see the VM anymore (a Mac that is connected loses the shares); status: shows whether Samba runs and
+    is announced, and the connected clients, the shares in use and the open files. Samba isn't started at boot, and
+    its announcement is installed disabled (AVAHI_SMB_SERVICE with .off): start lasts until the VM restarts, since the
+    file is renamed in the root filesystem, which is in RAM. Returns 1 if something failed."""
+    disabled = AVAHI_SMB_SERVICE + ".off"
+    failures = 0
+    if action == "start":
+        log("Starting Samba")
+        failures += subprocess.run(["rc-service", "samba", "start"]).returncode != 0
+        if os.path.exists(disabled):
+            log("Announcing Samba with Bonjour")
+            os.rename(disabled, AVAHI_SMB_SERVICE)
+            failures += subprocess.run(["avahi-daemon", "--reload"]).returncode != 0
+        for name in update_shares():
+            log(f"Shared {name} with SMB as smb://{socket.gethostname()}.local/{name}")
+    elif action == "stop":
+        if os.path.exists(AVAHI_SMB_SERVICE):
+            log("Removing the Bonjour announcement of Samba")
+            os.rename(AVAHI_SMB_SERVICE, disabled)
+            failures += subprocess.run(["avahi-daemon", "--reload"]).returncode != 0
+        log("Stopping Samba")
+        failures += subprocess.run(["rc-service", "samba", "stop"]).returncode != 0
+    else:
+        running = smbd_running()
+        log(f"Samba is {'running' if running else 'stopped'}, and "
+            f"{'announced' if os.path.exists(AVAHI_SMB_SERVICE) else 'not announced'} with Bonjour")
+        if running:
+            failures += run_shown("smbstatus") != 0
+    return 1 if failures else 0
+
+
 def mount():
     os.makedirs(MOUNT_ROOT, exist_ok=True)
     # The LUKS volumes are opened first, so that the pools and filesystems in them are found.
@@ -670,8 +724,7 @@ def mount():
         load_keys(name)
         mount_datasets(name)
     failures += mount_btrfs(pools)
-    for name in update_shares():
-        log(f"Shared {name} as smb://{socket.gethostname()}.local/{name}")
+    report_sharing(update_shares())
     return 1 if failures else 0
 
 
@@ -711,8 +764,9 @@ def parse_start_stop(args):
 
 def main():
     commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim, "scrub": scrub,
-                "speed-test": speed_test}
-    valid = (["mount"], ["unmount"], ["speed-test"], ["speed-test", "--mixed"])
+                "samba": samba, "speed-test": speed_test}
+    valid = (["mount"], ["unmount"], ["samba", "start"], ["samba", "stop"], ["samba", "status"], ["speed-test"],
+             ["speed-test", "--mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
     if command in ("trim", "scrub"):
         args = parse_start_stop(args)
@@ -722,8 +776,8 @@ def main():
         args = None
     if args is None:
         print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name]"
-              " | trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name] | speed-test [--mixed]}",
-              file=sys.stderr)
+              " | trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]"
+              " | samba {start | stop | status} | speed-test [--mixed]}", file=sys.stderr)
         return 1
     if os.geteuid() != 0:
         print("ERROR: must run as root", file=sys.stderr)
