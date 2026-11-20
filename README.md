@@ -2,20 +2,184 @@
 
 BridgeBox gives macOS access to disks with Linux filesystems (btrfs, ZFS) without kernel extensions or FUSE. A small
 Alpine Linux VM, run by [vfkit](https://github.com/crc-org/vfkit) on Apple's Virtualization.framework, will own the disk
-and expose it to the Mac only, through ssh and SMB.
+and expose it to the Mac only, through SMB and NFS.
+
 
 ## Requirements
 
 - An Apple Silicon Mac with macOS 14 or later.
 
-- [vfkit](https://github.com/crc-org/vfkit/releases), downloaded by hand: it must be in `PATH`, or its path must be set
-  in the `VFKIT` variable (e.g. `make start VFKIT=$HOME/bin/vfkit`).
+- To build BridgeBox from its sources (see [Development](#development)),
+  [vfkit](https://github.com/crc-org/vfkit/releases), downloaded by hand: it must be in `PATH`, or its path must be set
+  in the `VFKIT` variable (e.g. `make start VFKIT=$HOME/bin/vfkit`). The installer package includes it.
 
 Everything else ships with macOS. The Alpine image is downloaded in the `raw.tar.gz` format, which is already raw as
 vfkit requires, so no conversion tool is needed.
 
 
-## Development VM
+## Installation
+
+The installer package, `BridgeBox-<version>.pkg` (built with `make pkg`, see [Installer package](#installer-package)),
+installs:
+
+- `/usr/local/bin/BridgeBox`, the command;
+- `/usr/local/share/bridgebox/`, owned by root: the sealed VM disk with its ssh key, and vfkit.
+
+The package isn't signed: open it with right click > Open, or install it with `sudo installer -pkg
+BridgeBox-<version>.pkg -target /`. Nothing is started at installation. `sudo BridgeBox uninstall` removes everything
+(the VM must be stopped).
+
+
+## Usage
+
+Everything is done with the `BridgeBox` command (from the sources, `bin/BridgeBox`, or the targets of `make`: see
+[Development](#development)):
+
+```shell
+BridgeBox start [--samba] [--nfs] [disk...]    # starts the VM, mounts the disks and starts the sharing services
+BridgeBox stop                                 # unmounts the disks and stops the VM
+BridgeBox status                               # state of the VM
+BridgeBox ip                                   # IP address of the VM
+BridgeBox samba {start | stop | status}        # shares the disks with SMB
+BridgeBox nfs {start | stop | status}          # shares the disks with NFS
+BridgeBox disk-status [name]                   # state of the pools and filesystems
+BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
+BridgeBox scrub {start [--wait] | stop} [name] # scrub of the pools and filesystems
+BridgeBox speed-test [mixed]                   # measures the speed of the disks
+BridgeBox {zpool | zfs | btrfs} [argument...]  # runs the command in the VM
+BridgeBox ssh [command...]                     # logs in to the VM, or runs a command in it
+BridgeBox uninstall                            # removes BridgeBox
+```
+
+When BridgeBox is installed, the files written while the VM runs (process id, logs, ssh known hosts, EFI variables) are
+in `/tmp/bridgebox-<uid>/`.
+
+### Starting and stopping
+
+`start` starts the VM in background and waits until it's reachable with ssh. The disks are given as the identifiers of
+their partitions, as `diskutil list` shows them, e.g. `BridgeBox start disk10s2 disk8s2`. A partition must not be
+mounted by macOS (unmount it with `diskutil unmount`); if the user can't access it, `sudo` asks for the password to give
+it to the user. Disks can't be added to a running VM: `start` with a running VM only starts the sharing services, and
+the VM must be stopped first. `--samba` and `--nfs` start Samba and the NFS server, which can also be started later with
+`samba start` and `nfs start`.
+
+The VM first opens the LUKS volumes found on the partitions, asking for their passphrases (three attempts); then it
+imports all the ZFS pools found on the partitions and in the LUKS volumes, asks for the passphrase of each encryption
+root (three attempts) and mounts the datasets under `/srv/bridgebox` (e.g. `MyVolume/Data` on
+`/srv/bridgebox/MyVolume/Data`), without changing the mount points stored in the pools. It also mounts the btrfs
+filesystems found on them, also on more than one partition, on `/srv/bridgebox/<label>`, or `/srv/bridgebox/<uuid>` when
+the filesystem has no label, the label isn't usable as a share name or another pool or filesystem has the same name; all
+the subvolumes are visible as directories. A btrfs filesystem with missing devices isn't mounted.
+
+`stop` stops sharing, unmounts the btrfs filesystems, exports the pools and closes the LUKS volumes; then it stops the
+VM, forcing it off if it doesn't react. If the disks can't be unmounted (for instance, when a file is still open, or a
+share is still connected from the Finder), the VM is left running: `samba status` shows the open files.
+
+`status` shows the state of the VM as reported by vfkit, and `ip` its IP address. `ssh` logs in to the VM as the user
+`bridgebox`, who can run commands as root with `doas`; with a command, it runs it, e.g. `BridgeBox ssh doas getfattr -d
+-m - /srv/bridgebox/MyVolume/file`. The VM runs from a read-only image: whatever is written in it, outside the disks, is
+lost when it stops.
+
+### Sharing with Samba
+
+Samba isn't started at boot: `samba start` starts it and announces it with Bonjour, until the VM restarts; `samba stop`
+removes the announcement and stops Samba, so that the Mac doesn't see the shares anymore (a Mac that is connected loses
+them). `samba status` shows whether Samba runs and is announced, and, with `smbstatus`, the connected clients, the
+shares in use and the open files (useful when `stop` can't export a pool because a file is still open).
+
+When Samba runs, each mounted pool is shared with SMB as a share with the name of the pool (e.g.
+`smb://bridgebox.local/MyVolume`), and each btrfs filesystem as a share with the name of its mount point, so that the Mac
+sees the free space of each one; a pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared.
+The shares are read-write, with guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so the ones
+created from the Mac belong to `bridgebox:bridgebox`; files and directories with other owners (e.g. written when the
+shares were accessed as root) are only readable from the Mac until they are given to `bridgebox`, e.g. with `BridgeBox
+ssh doas chown -R bridgebox:bridgebox /srv/bridgebox/MyVolume`. While Samba runs, the VM is announced with Bonjour, so
+`bridgebox` appears in the sidebar of the Finder; otherwise use Go > Connect to Server with `smb://bridgebox.local` and
+connect as guest. NetBIOS is disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS metadata (Finder info, tags,
+extended attributes) are stored as extended attributes of the files on ZFS or btrfs rather than as AppleDouble `._`
+files (only resource forks still use `._` files).
+
+### Sharing with NFS
+
+The NFS server isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it (a
+Mac that has mounted an export loses it). `nfs status` shows whether the server runs, the exports, the connected
+clients, how many users and groups of the Mac are known and which extended attributes the Mac sees without `user.` (see
+below).
+
+Each mounted dataset and btrfs filesystem is exported only to the Mac, read-write, with NFSv4 only. The paths start from
+the name of the pool or of the btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so
+that it's reachable from it, or can be mounted by itself (e.g. `bridgebox.local:/MyVolume/Music`). While the server runs,
+the export of each pool and btrfs filesystem is announced with Bonjour (`_nfs._tcp`, as `<name> on bridgebox`). The Mac
+mounts NFSv3 by default, so it must be told to use NFSv4.0 (the only NFSv4 version it supports) and named attributes:
+e.g. `mount -t nfs -o vers=4.0,namedattr bridgebox.local:/MyVolume <directory>`, or, for the Finder
+(Go > Connect to Server with `nfs://bridgebox.local/MyVolume`), the line `nfs.client.mount.options = vers=4.0,namedattr`
+in `/etc/nfs.conf` of the Mac (which applies to all its NFS mounts).
+
+Files keep the user and group ids of the Mac: unlike with Samba, they belong to the users of the Mac, as on its disks
+(e.g. a clone made on the Mac), and the ones created from the Mac belong to the user who creates them. Root on the Mac
+is root in the VM too, so that backup tools that run as root, such as Carbon Copy Cloner, can write everywhere. When the
+Mac sets the owner of a file, NFSv4 sends it as a name (e.g. `fritz@mistral.local`): `nfs start` sends the users and
+groups of the Mac to the VM, so that the names are translated into the ids of the Mac, whatever its domain.
+
+The extended attributes of the Mac are stored as `user.` extended attributes of the files (e.g.
+`user.com.apple.FinderInfo`), so there are no AppleDouble `._` files. The names that already start with `user.` (e.g.
+`user.it.tidalwave.datamanager.id`, written by programs that use the same names as on Linux) are stored as they are,
+without a second `user.` (that ZFS refuses). Since the stored names don't say which of the two they were on the Mac,
+`user.` is removed, for the Mac, only from the attributes whose names start with one of the prefixes in
+`/etc/ganesha/bridgebox-named-attrs.conf` of the VM, which `nfs start` sends (for now only `user.com.apple.`): the
+others (e.g. `user.com.dropbox.attrs`, from `com.dropbox.attrs` on the Mac) are shown with `user.`. An extended
+attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't be written. The top
+directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be written, but not
+read): macOS deadlocks when it mounts a nested dataset whose top directory has some.
+
+### Checking and maintaining the disks
+
+`disk-status` shows, for each imported ZFS pool, `zpool status -v -t -i -s -D` (errors, TRIM, initialization, slow I/O
+operations, deduplication), `zpool list -v` and the `autotrim` and `freeing` properties; for each mounted btrfs
+filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device stats`, `btrfs scrub status` and `btrfs
+balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its datasets),
+that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem (by the name of
+its mount point), e.g. `disk-status MyVolume/Music`.
+
+`trim start` starts the TRIM of each imported ZFS pool (`zpool trim`), or only of the one given (e.g. `trim start
+MyVolume`; a btrfs filesystem is given by the name of its mount point), which runs in background in the VM, or resumes it
+if it was suspended; with `--wait`, it waits until it's finished (Ctrl-C stops waiting, not the TRIM). `trim stop`
+suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices doesn't support it: e.g. a LUKS volume
+must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the LUKS
+header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim start`
+waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
+
+`scrub start` starts the scrub of each imported ZFS pool (`zpool scrub`) and of each mounted btrfs filesystem (`btrfs
+scrub start`), or only of the one given (e.g. `scrub start MyVolume`), which run in background in the VM; with `--wait`,
+it waits until they are finished (Ctrl-C stops waiting, not the scrub). `scrub stop` pauses them (`zpool scrub -p`,
+`btrfs scrub cancel`); the next `scrub start` resumes them from where they were: always for ZFS, which keeps the
+progress in the pool, but for btrfs only until the VM restarts, since btrfs keeps it in `/var/lib/btrfs`, which is in
+RAM. The results are shown by `disk-status`.
+
+### Measuring the speed
+
+`speed-test` measures with `fio`, in turn, the speed of each pool whose root dataset is mounted and of each btrfs
+filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in 1 MiB blocks
+through the cache, including the time to flush it to the disk; then, after dropping the caches, it reads back what was
+written, through the cache too, as the Finder or a copy does (direct I/O isn't used for reading, since on ZFS it
+disables the read-ahead and would measure the latency of the disk rather than its throughput). With `mixed`, it reads
+and writes at the same time, half and half, with direct I/O and 16 requests in flight: this measures the total
+throughput of the disk under a mixed load, split between the two directions. Each run lasts at most 30 seconds; at the
+end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows them).
+
+The test file is 4 GiB; if there isn't enough free space (with a margin of 256 MiB), 2 GiB and then 1 GiB are tried,
+with a warning; if even 1 GiB doesn't fit, an error is reported for that volume and the test goes on with the next one.
+The file is written in a temporary directory in the volume, which is always deleted.
+
+### ZFS and btrfs commands
+
+`zpool`, `zfs` and `btrfs` run the command with the same name in the VM, as root, with the given arguments as they are,
+e.g. `BridgeBox zpool status -v MyVolume` or `BridgeBox zfs list -o space`. The exit status is the command's. A terminal
+is used only when `BridgeBox` runs in one, so that the commands that ask for something (e.g. `zfs load-key`) work, while
+in pipes and scripts the output is the plain one (e.g. `BridgeBox zfs list -H -o name | grep Music`).
+
+
+## Development
 
 ```shell
 make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
@@ -33,130 +197,45 @@ make clean    # stops and deletes the VM (the Alpine image is kept; 'make distcl
 ```
 
 `make image` runs `scripts/prepare-vm.sh`, which boots the VM once to create the user `bridgebox` and install
-`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi
-and Samba, with
-`scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check that it runs
-from a read-only disk, that the kernel modules load, that Samba can be started and stopped and that the Mac can resolve
-the VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that failed. The
-other targets run `bin/BridgeBox`, which can also be invoked directly
-(`bin/BridgeBox start [--samba] [--nfs] [disk...] | stop | status | ip | disk-status [name] |
-trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name] | samba {start | stop | status} |
-nfs {start | stop | status} | speed-test [mixed] | {zpool | zfs | btrfs} [argument...] | ssh [command...]`).
-Settings shared by the two scripts are in `scripts/config.sh`.
+`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi,
+Samba and nfs-ganesha, with `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed
+VM to check that it runs from a read-only disk, that the kernel modules load, that Samba and nfs-ganesha can be started
+and stopped and that the Mac can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image`
+resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly, with all
+the commands of [Usage](#usage). Settings shared by the two scripts are in `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
 disk is used as it comes in the Alpine image, without resizing.
 
-Once sealed, the image never changes: `bin/BridgeBox` attaches its disk read-only, and the root filesystem of the VM
-is an overlay with a tmpfs on top (the `overlaytmpfs` boot option of Alpine), so whatever the VM writes is lost when it
+### How it works
+
+Once sealed, the image never changes: `bin/BridgeBox` attaches its disk read-only, and the root filesystem of the VM is
+an overlay with a tmpfs on top (the `overlaytmpfs` boot option of Alpine), so whatever the VM writes is lost when it
 stops. cloud-init is disabled in the sealed image, and the EFI variables are created from scratch at each start in
 `/tmp/bridgebox-<uid>/`.
 
 The VM uses the NAT network of Virtualization.framework: it gets an address reachable from the Mac but not from the
 local network. Once sealed, the VM announces itself with Bonjour as `bridgebox.local` (IPv4 only), which is how
-`bin/BridgeBox` finds its address; while `make image` provisions the VM, before Avahi is installed, the address is
-taken from `/var/db/dhcpd_leases`, by the fixed MAC address of the VM.
+`bin/BridgeBox` finds its address; while `make image` provisions the VM, before Avahi is installed, the address is taken
+from `/var/db/dhcpd_leases`, by the fixed MAC address of the VM.
 
 Mounting is done inside the VM by a back-end, `vm/bridgebox-backend.py` (installed in the image as
 `/usr/local/sbin/bridgebox-backend`), which `bin/BridgeBox` runs over ssh. When partitions are passed to `start`, it
-first opens the LUKS volumes found on them, asking for their passphrases (three attempts), as
-`/dev/mapper/bridgebox-<LUKS uuid>`; then it imports all the ZFS pools found on the partitions and in the LUKS volumes
-with `zpool import -f -N -R /srv/bridgebox` (so `Clone2/Data` is mounted on
-`/srv/bridgebox/Clone2/Data`, without changing the mount points stored in the pool), asks for the passphrase of each
-encryption root (three attempts) and mounts the datasets. It also mounts the btrfs filesystems found on them (after
-`btrfs device scan`, so that filesystems on more than one partition work too) on `/srv/bridgebox/<label>`, or
-`/srv/bridgebox/<uuid>` when the filesystem has no label, the label isn't usable as a share name or another pool or
-filesystem has the same name; the top-level subvolume is mounted (`subvolid=5`), so that all the subvolumes are visible
-as directories, with the default options of the kernel. A btrfs filesystem with missing devices isn't mounted. `stop`
-has the back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened
-first, and doesn't power off the VM if that fails (for instance, when a file is still open, or a share is still connected from the Finder).
-
-`disk-status` shows, for each imported ZFS pool, `zpool status -v -t -i -s -D` (errors, TRIM, initialization, slow I/O
-operations, deduplication), `zpool list -v` and the `autotrim` and `freeing` properties; for each mounted btrfs
-filesystem, `btrfs filesystem show`, `btrfs filesystem usage`, `btrfs device stats`, `btrfs scrub status` and
-`btrfs balance status`. With a name, it shows only that pool (adding `zfs list -r -o space`, the space used by its
-datasets), that dataset (the status of its pool, `zfs list -r -o space` and `zfs get all`) or that btrfs filesystem
-(by the name of its mount point), e.g. `disk-status Clone2/Music`.
-
-`trim start` starts the TRIM of each imported ZFS pool (`zpool trim`), or only of the one given (e.g. `trim start
-Clone2`; a btrfs filesystem is given by the name of its mount point), which runs in background in the VM, or resumes
-it if it was suspended; with `--wait`, it waits until it's finished (Ctrl-C stops waiting, not the TRIM). `trim stop`
-suspends it (`zpool trim -s`). The TRIM of a pool fails if one of its devices doesn't support it: e.g. a LUKS volume
-must be opened with discards (`cryptsetup refresh --allow-discards --persistent <name>` stores the option in the
-LUKS header). Mounted btrfs filesystems are trimmed with `fstrim`, which returns only when it's finished: so `trim
-start` waits for them even without `--wait`, after starting the ZFS pools, and `trim stop` can't stop them.
-
-`scrub start` starts the scrub of each imported ZFS pool (`zpool scrub`) and of each mounted btrfs filesystem (`btrfs
-scrub start`), or only of the one given (e.g. `scrub start Clone2`), which run in background in the VM; with `--wait`, it waits until they are finished (Ctrl-C stops
-waiting, not the scrub). `scrub stop` pauses them (`zpool scrub -p`, `btrfs scrub cancel`); the next `scrub start`
-resumes them from where they were: always for ZFS, which keeps the progress in the pool, but for btrfs only until the
-VM restarts, since btrfs keeps it in `/var/lib/btrfs`, which is in RAM. The results are shown by `disk-status`.
-
-`speed-test` has the back-end measure with `fio`, in turn, the speed of each pool whose root dataset is mounted and of
-each btrfs filesystem. By default it measures what a copy (e.g. a backup) does: it writes a test file sequentially, in
-1 MiB blocks through the cache, including the time to flush it to the disk; then, after dropping the caches, it reads
-back what was written, through the cache too, as the Finder or a copy does (direct I/O isn't used for reading, since
-on ZFS it disables the read-ahead and would measure the latency of the disk rather than its throughput). With
-`mixed`, it reads and writes at the same time, half and half, with direct I/O and 16 requests in flight: this measures
-the total throughput of the disk under a mixed load, split between the two directions. Each run lasts at most 30
-seconds; at the end, a summary shows the speeds in MB/s (1 MB = 1,000,000 bytes, as macOS shows them).
-
-The test file is 4 GiB; if there isn't enough free space (with a margin of 256 MiB), 2 GiB and then 1 GiB are tried,
-with a warning; if even 1 GiB doesn't fit, an error is reported for that volume and the test goes on with the next one.
-The file is written in a temporary directory in the volume, which is always deleted.
-
-Samba isn't started at boot: `samba start` starts it and announces it with Bonjour, until the VM restarts; `samba stop`
-removes the announcement and stops Samba, so that the Mac doesn't see the shares anymore (a Mac that is connected loses
-them). `samba status` shows whether Samba runs and is announced, and, with `smbstatus`, the connected clients, the
-shares in use and the open files (useful when `stop` can't export a pool because a file is still open).
-
-`zpool`, `zfs` and `btrfs` run the command with the same name in the VM, as root, with the given arguments as they
-are, e.g. `bin/BridgeBox zpool status -v Clone2` or `bin/BridgeBox zfs list -o space`. The exit status is the
-command's. A terminal is used only when `bin/BridgeBox` runs in one, so that the commands that ask for something (e.g.
-`zfs load-key`) work, while in pipes and scripts the output is the plain one (e.g. `bin/BridgeBox zfs list -H -o name |
-grep Music`).
+first opens the LUKS volumes found on them as `/dev/mapper/bridgebox-<LUKS uuid>`; then it imports all the ZFS pools
+found on the partitions and in the LUKS volumes with `zpool import -f -N -R /srv/bridgebox`, loads the keys and mounts
+the datasets. It mounts the btrfs filesystems after `btrfs device scan`, so that filesystems on more than one partition
+work too; the top-level subvolume is mounted (`subvolid=5`), with the default options of the kernel. `stop` has the
+back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened first,
+and doesn't power off the VM if that fails; otherwise the VM gets a Stop request first, and a HardStop if the guest
+doesn't react.
 
 The NFS server is nfs-ganesha (`ganesha.nfsd`), built from its sources by `scripts/provision.sh` (version V15.12, with
-the workarounds for the NFS client of macOS), since the NFS server of the Linux kernel can't store the extended
-attributes of the Mac: over NFSv4.0, macOS sends them as named attributes, which nfs-ganesha supports, storing each one
-as a `user.` extended attribute of the file (e.g. `user.com.apple.FinderInfo`), so there are no AppleDouble `._` files.
-The names that already start with `user.` (e.g. `user.it.tidalwave.datamanager.id`, written by programs that use the
-same names as on Linux) are stored as they are, without a second `user.` (that ZFS refuses). Since the stored names
-don't say which of the two they were on the Mac, `user.` is removed, for the Mac, only from the attributes whose names
-start with one of the prefixes in `/etc/ganesha/bridgebox-named-attrs.conf` of the VM, which `nfs start` sends (for now
-only `user.com.apple.`): the others (e.g. `user.com.dropbox.attrs`, from `com.dropbox.attrs` on the Mac) are shown with
-`user.`. An extended attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't
-be written. The top directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be
-written, but not read): macOS deadlocks when it mounts a nested dataset whose top directory has some. The NFS server
-isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it. It serves only
-NFSv4, on TCP port 2049, without grace period. Each mounted dataset and btrfs filesystem is exported only to the Mac
-(the gateway of the NAT network of the VM), read-write, with the user and group ids of the Mac: unlike with Samba, files
-belong to the users of the Mac, as on its disks (e.g. a clone made on the Mac), and the ones created from the Mac belong
-to the user who creates them. Root on the Mac is root in the VM too (`No_Root_Squash`), so that backup tools that run as
-root, such as Carbon Copy Cloner, can write everywhere. When the Mac sets the owner of a file, NFSv4 sends it as a name
-(e.g. `fritz@mistral.local`): `nfs start` sends the users and groups of the Mac to the VM (with `dscl`), and nfs-ganesha
-translates the names with them, whatever the domain of the Mac, in a mount namespace of its own where they replace
-`/etc/passwd` and `/etc/group`, so that they don't clash with the ones of the VM (e.g. `staff` is 20 on the Mac). While
-the server runs, the export of each pool and btrfs filesystem is announced with Bonjour (`_nfs._tcp`, as `<name> on
-bridgebox`). The Mac mounts NFSv3 by default, so it must be told to use NFSv4.0 (the only NFSv4 version it supports) and
-named attributes: e.g. `mount -t nfs -o vers=4.0,namedattr bridgebox.local:/Clone2 <directory>`, or, for the Finder
-(Go > Connect to Server with `nfs://bridgebox.local/Clone2`), the line `nfs.client.mount.options = vers=4.0,namedattr`
-in `/etc/nfs.conf` of the Mac (which applies to all its NFS mounts). The paths start from the name of the pool or of the
-btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so that it's reachable from it,
-or can be mounted by itself (e.g. `bridgebox.local:/Clone2/Music`). `nfs status` shows whether the server runs, the
-exports, the connected clients and how many users and groups of the Mac are known.
-
-When Samba runs, each mounted pool is shared with SMB as a share with the name of the pool (e.g.
-`smb://bridgebox.local/Clone2`), and each btrfs filesystem as a share with the name of its mount point, so that the Mac
-sees the free space of each one; a pool whose root dataset can't be mounted (e.g. its key wasn't loaded) isn't shared.
-The shares are read-write, with guest access. Files are accessed as the user `bridgebox` (UID and GID 1100), so the ones
-created from the Mac belong to `bridgebox:bridgebox`; files and directories with other owners (e.g. written when the
-shares were accessed as root) are only readable from the Mac until they are given to `bridgebox`, e.g. with
-`bin/BridgeBox ssh doas chown -R bridgebox:bridgebox /srv/bridgebox/Clone2`. While Samba runs, the VM is announced with
-Bonjour, so `bridgebox` appears in the sidebar of the Finder; otherwise use Go > Connect to Server with
-`smb://bridgebox.local` and connect as guest. NetBIOS is disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS
-metadata (Finder info, tags, extended attributes) are stored as extended attributes of the files on ZFS or btrfs rather
-than as AppleDouble `._` files (only resource forks still use `._` files).
+the workarounds for the NFS client of macOS and a few changes of BridgeBox, described there), since the NFS server of
+the Linux kernel can't store the extended attributes of the Mac: over NFSv4.0, macOS sends them as named attributes,
+which nfs-ganesha supports. It serves only NFSv4, on TCP port 2049, without grace period, to the gateway of the NAT
+network of the VM, which is the Mac, with `No_Root_Squash`. The users and groups of the Mac (read with `dscl` by `nfs
+start`) are used by nfs-ganesha in a mount namespace of its own, where they replace `/etc/passwd` and `/etc/group`, so
+that they don't clash with the ones of the VM (e.g. `staff` is 20 on the Mac).
 
 Files in `target/vm`:
 
@@ -174,25 +253,14 @@ Files in `target/vm`:
 The REST API socket of vfkit is `/tmp/bridgebox-<uid>/vfkit.sock`, outside `target/vm` because macOS limits the length
 of Unix socket paths.
 
-
-## Installer package
+### Installer package
 
 ```shell
 make pkg                     # or: make pkg VFKIT=$HOME/bin/vfkit VERSION=0.2
 ```
 
-builds `target/BridgeBox-<version>.pkg` from the prepared VM (`make image` is run first, if needed). The package
-installs:
-
-- `/usr/local/bin/BridgeBox`, the command, with the settings of `scripts/config.sh` included;
-- `/usr/local/share/bridgebox/`, owned by root: the sealed VM disk with its ssh key, and vfkit.
-
-Nothing is started at installation. Once installed, BridgeBox is used with `BridgeBox start [disk...]`,
-`BridgeBox stop` and the other commands; the files written while the VM runs (process id, logs, ssh known hosts, EFI
-variables) are in `/tmp/bridgebox-<uid>/`. `sudo BridgeBox uninstall` removes everything (the VM must be stopped).
-
-The package isn't signed: open it with right click > Open, or install it with
-`sudo installer -pkg target/BridgeBox-<version>.pkg -target /`.
+builds `target/BridgeBox-<version>.pkg` from the prepared VM (`make image` is run first, if needed), with the settings
+of `scripts/config.sh` included in the command; see [Installation](#installation) for what it installs.
 
 
 ## License
