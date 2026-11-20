@@ -120,8 +120,13 @@ The NFS server is nfs-ganesha (`ganesha.nfsd`), built from its sources by `scrip
 the workarounds for the NFS client of macOS), since the NFS server of the Linux kernel can't store the extended
 attributes of the Mac: over NFSv4.0, macOS sends them as named attributes, which nfs-ganesha supports, storing each one
 as a `user.` extended attribute of the file (e.g. `user.com.apple.FinderInfo`), so there are no AppleDouble `._` files.
-An extended attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't be
-written. The top directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be
+The names that already start with `user.` (e.g. `user.it.tidalwave.datamanager.id`, written by programs that use the
+same names as on Linux) are stored as they are, without a second `user.` (that ZFS refuses). Since the stored names
+don't say which of the two they were on the Mac, `user.` is removed, for the Mac, only from the attributes whose names
+start with one of the prefixes in `/etc/ganesha/bridgebox-named-attrs.conf` of the VM, which `nfs start` sends (for now
+only `user.com.apple.`): the others (e.g. `user.com.dropbox.attrs`, from `com.dropbox.attrs` on the Mac) are shown with
+`user.`. An extended attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't
+be written. The top directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be
 written, but not read): macOS deadlocks when it mounts a nested dataset whose top directory has some. The NFS server
 isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it. It serves only
 NFSv4, on TCP port 2049, without grace period. Each mounted dataset and btrfs filesystem is exported only to the Mac

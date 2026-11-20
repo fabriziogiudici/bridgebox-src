@@ -211,11 +211,18 @@ EOF
 #   it keeps it busy, and if that directory has named attributes it waits forever, and so does everything that goes
 #   through it (e.g. the Finder and ls in the pool); with this, the server says that the top directory of a filesystem
 #   has none, so macOS doesn't read them. Its extended attributes can still be written, but not read from the Mac.
+# - the names of the extended attributes: by default nfs-ganesha stores the attribute "x" of the Mac as "user.x", and
+#   shows "user.x" to the Mac as "x"; but some programs on the Mac use names that already start with "user." (as on
+#   Linux), which would become "user.user.x", that ZFS refuses. With named_attr_strip_user_prefixes (in the
+#   configuration below), the names that start with "user." are stored as they are, and "user." is removed only from
+#   the attributes whose names start with one of the prefixes in /etc/ganesha/bridgebox-named-attrs.conf (by default
+#   "user.com.apple.", the attributes of macOS; the back-end rewrites it with what bin/BridgeBox sends at nfs start):
+#   the others are shown to the Mac with "user.".
 # A change to the sources or to the options of the build needs a new GANESHA_BUILD, so that it's rebuilt.
 # Only the VFS FSAL and NFSv4 are built (no NFSv3, NLM, RQUOTA, rpcbind, DBus, Kerberos).
 GANESHA_VERSION=V15.12
 GANESHA_COMMIT=f7a6811d936f776261bce0fd08570e214fe0b061
-GANESHA_BUILD="$GANESHA_VERSION-bridgebox-2"
+GANESHA_BUILD="$GANESHA_VERSION-bridgebox-3"
 echo "==> Installing nfs-ganesha $GANESHA_VERSION"
 apk add userspace-rcu acl-libs libblkid libuuid libcap2
 if [ ! -x /usr/bin/ganesha.nfsd ] || [ "$(cat /usr/lib/ganesha/bridgebox-build 2> /dev/null)" != "$GANESHA_BUILD" ]; then
@@ -275,18 +282,23 @@ EOF
     done
     patch --quiet --forward --ignore-whitespace -p1 -d "$build/nfs-ganesha" << 'EOF'
 diff --git a/src/FSAL/FSAL_VFS/namedattr.c b/src/FSAL/FSAL_VFS/namedattr.c
-index b92a125..00a2470 100644
+index b92a125..9a219f2 100644
 --- a/src/FSAL/FSAL_VFS/namedattr.c
 +++ b/src/FSAL/FSAL_VFS/namedattr.c
-@@ -85,6 +85,7 @@
+@@ -82,9 +82,12 @@
+
+ #include "config.h"
+
++#include <errno.h>
  #include <pthread.h>
++#include <stdio.h>
  #include <string.h>
  #include <sys/types.h>
 +#include <sys/stat.h>
  #ifdef LINUX
  #include <linux/limits.h> /* for XATTR_SIZE_MAX, XATTR_NAME_MAX */
  #endif
-@@ -97,6 +98,7 @@
+@@ -97,6 +100,7 @@
  #include "vfs_methods.h"
  #include "os/xattr.h"
  #include "city.h"
@@ -294,7 +306,132 @@ index b92a125..00a2470 100644
 
  /* Everything up to the #else at the end of this file uses Linux-only
   * interfaces: listxattr() and llistxattr() on paths, /proc/self/fd, and
-@@ -1514,6 +1516,56 @@ bool vfs_is_attr_obj(const struct fsal_obj_handle *obj_hdl)
+@@ -147,18 +151,113 @@ static inline struct vfs_attr_handle *to_attr(struct fsal_obj_handle *obj_hdl)
+ 	return container_of(obj_hdl, struct vfs_attr_handle, obj_handle);
+ }
+
++/*
++ * Names that keep "user." (named_attr_strip_user_prefixes in the VFS block).
++ *
++ * By default a named attribute "x" is the extended attribute "user.x". Some
++ * clients use names that already start with "user." (e.g. programs that write
++ * the same names on macOS and on Linux), which would become "user.user.x":
++ * ZFS on Linux refuses those, and they aren't the names that the same program
++ * uses on Linux. With named_attr_strip_user_prefixes, which names a file with
++ * one prefix of extended attribute names per line (empty lines and lines
++ * starting with '#' are ignored):
++ * - a named attribute that starts with "user." is the extended attribute with
++ *   the same name, any other "x" is still "user.x";
++ * - an extended attribute "user.x" is the named attribute "x" if its name
++ *   starts with one of the prefixes (e.g. user.com.apple. for the attributes
++ *   of macOS), otherwise the named attribute "user.x".
++ * The names don't say which of the two a client used, so the prefixes must
++ * list the names that clients use without "user.": any other is shown to them
++ * with "user.". Without the option, every "user.x" is "x".
++ */
++static char **strip_user_prefixes;
++static bool strip_user_configured;
++
++int vfs_load_named_attr_prefixes(const char *path)
++{
++	char line[XATTR_NAME_MAX + 2];
++	char **prefixes = NULL;
++	int count = 0;
++	FILE *file;
++
++	if (path == NULL)
++		return 0;
++
++	file = fopen(path, "r");
++
++	if (file == NULL) {
++		LogCrit(COMPONENT_FSAL,
++			"named_attr_strip_user_prefixes: can't read %s: %s",
++			path, strerror(errno));
++		return errno;
++	}
++
++	while (fgets(line, sizeof(line), file) != NULL) {
++		size_t len = strcspn(line, "\r\n");
++
++		line[len] = '\0';
++
++		if (len == 0 || line[0] == '#')
++			continue;
++
++		prefixes = gsh_realloc(prefixes, (count + 2) * sizeof(char *),
++				       MEM_COMP_FSAL);
++		prefixes[count++] = gsh_strdup(line, MEM_COMP_FSAL);
++		LogEvent(COMPONENT_FSAL,
++			 "Extended attributes %s* are named attributes without \"user.\"",
++			 line);
++	}
++
++	fclose(file);
++
++	if (prefixes == NULL)
++		prefixes = gsh_calloc(1, sizeof(char *), MEM_COMP_FSAL);
++
++	prefixes[count] = NULL;
++	strip_user_prefixes = prefixes;
++	strip_user_configured = true;
++
++	return 0;
++}
++
+ /**
+  * @brief Build the extended attribute name for a named attribute
+  *
+- * @return 0, or ENAMETOOLONG.
++ * @return 0, EINVAL, or ENAMETOOLONG.
+  */
+ static int attr_xname(const char *name, char *xname, size_t xname_size)
+ {
+-	int len = snprintf(xname, xname_size, ATTR_PREFIX "%s", name);
++	int len;
++
++	if (strip_user_configured &&
++	    strncmp(name, ATTR_PREFIX, ATTR_PREFIX_LEN) == 0) {
++		if (name[ATTR_PREFIX_LEN] == '\0')
++			return EINVAL;
++		len = snprintf(xname, xname_size, "%s", name);
++	} else {
++		len = snprintf(xname, xname_size, ATTR_PREFIX "%s", name);
++	}
+
+ 	return (len < 0 || len >= xname_size) ? ENAMETOOLONG : 0;
+ }
+
++/**
++ * @brief Whether an extended attribute name keeps "user." as a named attribute
++ */
++static bool attr_keeps_user(const char *xname)
++{
++	char **prefix;
++
++	if (!strip_user_configured)
++		return false;
++
++	for (prefix = strip_user_prefixes; *prefix != NULL; prefix++)
++		if (strncmp(xname, *prefix, strlen(*prefix)) == 0)
++			return false;
++
++	return true;
++}
++
+ /**
+  * @brief Whether an extended attribute name is a named attribute
+  *
+@@ -177,7 +276,7 @@ static const char *attr_from_xname(const char *xname)
+ 	    strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+ 		return NULL;
+
+-	return name;
++	return attr_keeps_user(xname) ? xname : name;
+ }
+
+ /**
+@@ -1514,6 +1613,56 @@ bool vfs_is_attr_obj(const struct fsal_obj_handle *obj_hdl)
  	       obj_hdl->obj_ops == &named_attr_ops;
  }
 
@@ -351,7 +488,7 @@ index b92a125..00a2470 100644
  /* Entry points from the rest of VFS */
 
  /**
-@@ -1533,6 +1585,16 @@ void vfs_get_named_attr(int fd, const char *path, struct fsal_attrlist *attrs)
+@@ -1533,6 +1682,16 @@ void vfs_get_named_attr(int fd, const char *path, struct fsal_attrlist *attrs)
  						      fso_named_attr))
  		return;
 
@@ -368,6 +505,95 @@ index b92a125..00a2470 100644
  	/* Only files and directories have them */
  	if ((attrs->type == REGULAR_FILE || attrs->type == DIRECTORY) &&
  	    attr_any_at(fd, path, &any) != 0)
+@@ -1708,11 +1867,23 @@ fsal_status_t vfs_attr_create_handle(struct fsal_export *exp_hdl,
+ 		     xname += strlen(xname) + 1) {
+ 			const char *n = attr_from_xname(xname);
+
++			/* A client may have opened it by the other name
++			 * that gives the same extended attribute (see
++			 * attr_xname()): "x" or "user.x".
++			 */
+ 			if (n != NULL &&
+ 			    CityHash64(n, strlen(n)) == name_hash) {
+ 				name = n;
+ 				break;
+ 			}
++			if (n != NULL && strip_user_configured) {
++				n = n == xname ? xname + ATTR_PREFIX_LEN
++					       : xname;
++				if (CityHash64(n, strlen(n)) == name_hash) {
++					name = n;
++					break;
++				}
++			}
+ 		}
+
+ 		if (name == NULL) {
+@@ -1762,6 +1933,11 @@ bool vfs_is_attr_handle(const vfs_file_handle_t *fh)
+ 	return false;
+ }
+
++int vfs_load_named_attr_prefixes(const char *path)
++{
++	return 0;
++}
++
+ void vfs_get_named_attr(int fd, const char *path, struct fsal_attrlist *attrs)
+ {
+ }
+diff --git a/src/FSAL/FSAL_VFS/vfs/main-c.in.cmake b/src/FSAL/FSAL_VFS/vfs/main-c.in.cmake
+index 0d53b07..6869ef1 100644
+--- a/src/FSAL/FSAL_VFS/vfs/main-c.in.cmake
++++ b/src/FSAL/FSAL_VFS/vfs/main-c.in.cmake
+@@ -37,6 +37,7 @@
+ #include <pthread.h>
+ #include <string.h>
+ #include <limits.h>
++#include <sys/param.h> /* MAXPATHLEN */
+ #include <sys/types.h>
+ #include "gsh_list.h"
+ #include "fsal.h"
+@@ -109,6 +110,8 @@ static struct config_item vfs_params[] = {
+ 	CONF_ITEM_BOOL("only_one_user", false, vfs_fsal_module, only_one_user),
+ 	CONF_ITEM_BOOL("named_attr", false, vfs_fsal_module,
+ 		       module.fs_info.named_attr),
++	CONF_ITEM_PATH("named_attr_strip_user_prefixes", 1, MAXPATHLEN, NULL,
++		       vfs_fsal_module, named_attr_strip_user_prefixes),
+ 	CONFIG_EOL
+ };
+
+@@ -193,6 +196,10 @@ static fsal_status_t init_config(struct fsal_module *vfs_fsal_module,
+ 	    !config_error_is_harmless(err_type))
+ 		return fsalstat(ERR_FSAL_INVAL, 0);
+
++	if (vfs_load_named_attr_prefixes(
++		    vfs_module->named_attr_strip_user_prefixes) != 0)
++		return fsalstat(ERR_FSAL_INVAL, 0);
++
+ 	display_fsinfo(&vfs_module->module);
+ 	LogFullDebug(COMPONENT_FSAL,
+ 		     "Supported attributes constant = 0x%" PRIx64,
+diff --git a/src/FSAL/FSAL_VFS/vfs_methods.h b/src/FSAL/FSAL_VFS/vfs_methods.h
+index f9ebee9..167e4fb 100644
+--- a/src/FSAL/FSAL_VFS/vfs_methods.h
++++ b/src/FSAL/FSAL_VFS/vfs_methods.h
+@@ -47,6 +47,8 @@ struct vfs_fsal_module {
+ 	struct fsal_module module;
+ 	struct fsal_obj_ops handle_ops;
+ 	bool only_one_user;
++	/** File of named_attr_strip_user_prefixes, or NULL */
++	char *named_attr_strip_user_prefixes;
+ };
+
+ /*
+@@ -76,6 +78,7 @@ fsal_status_t vfs_attr_create_handle(struct fsal_export *exp_hdl,
+ 				     struct fsal_obj_handle **handle,
+ 				     struct fsal_attrlist *attrs_out);
+ void vfs_get_named_attr(int fd, const char *path, struct fsal_attrlist *attrs);
++int vfs_load_named_attr_prefixes(const char *path);
+ bool vfs_is_attr_obj(const struct fsal_obj_handle *obj_hdl);
+
+ /* Marking handles of named attribute objects (handle_syscalls.c) */
 diff --git a/src/include/gsh_config.h b/src/include/gsh_config.h
 index 371f036..b9d078d 100644
 --- a/src/include/gsh_config.h
@@ -404,6 +630,7 @@ EOF
     sed -i "s|if ($check) {|if (0 \\&\\& $check) {|" "$src/idmapper/idmapper.c"
     if ! grep -qF "if (0 && $check) {" "$src/idmapper/idmapper.c" \
             || ! grep -q macos_quirk_named_attr_mount_root "$src/FSAL/FSAL_VFS/namedattr.c" \
+            || ! grep -q named_attr_strip_user_prefixes "$src/FSAL/FSAL_VFS/vfs/main-c.in.cmake" \
             || grep -qE "$typedefs" "$src"/include/*.h; then
         echo "ERROR: the sources of nfs-ganesha couldn't be changed" >&2
         exit 1
@@ -457,6 +684,7 @@ DIRECTORY_SERVICES {
 }
 VFS {
 	named_attr = true;
+	named_attr_strip_user_prefixes = "/etc/ganesha/bridgebox-named-attrs.conf";
 }
 LOG {
 	Default_Log_Level = EVENT;
@@ -468,6 +696,11 @@ EXPORT_DEFAULTS {
 EOF
 echo "# Written by bridgebox-backend: one export for each mounted filesystem, only for the Mac." \
     > /etc/ganesha/bridgebox-exports.conf
+# The prefixes of the extended attributes that the Mac sees without "user." (see above); the back-end rewrites the file
+# with the ones that bin/BridgeBox sends at nfs start.
+printf '%s\n' "# Written by scripts/provision.sh, rewritten by bridgebox-backend: the extended attributes whose names start" \
+    "# with these prefixes are shown to the Mac without \"user.\"." "user.com.apple." \
+    > /etc/ganesha/bridgebox-named-attrs.conf
 # When the Mac sets the owner of a file, NFSv4 sends it as a name, user@domain, which nfs-ganesha translates into an id
 # with getpwnam() and getgrnam(). It must do so with the users and groups of the Mac, whose names and ids differ from
 # the ones of the VM (e.g. staff is 20 on the Mac): so it runs in a mount namespace of its own (a slave of the one of
