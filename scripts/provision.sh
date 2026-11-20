@@ -206,12 +206,19 @@ EOF
 #   fritz@mistral.local): nfs-ganesha translates only the names of its own domain, so the check of the domain is
 #   removed, and the name before '@' is always used;
 # - the default stack of the threads of musl is 128 KiB: the one of glibc, 8 MiB, is set at link time.
+# - a workaround for a deadlock of macOS, macOS_quirk_named_attr_mount_root (in the configuration below): when macOS
+#   mounts a dataset nested in another one (a mirror mount), it reads an extended attribute of its top directory while
+#   it keeps it busy, and if that directory has named attributes it waits forever, and so does everything that goes
+#   through it (e.g. the Finder and ls in the pool); with this, the server says that the top directory of a filesystem
+#   has none, so macOS doesn't read them. Its extended attributes can still be written, but not read from the Mac.
+# A change to the sources or to the options of the build needs a new GANESHA_BUILD, so that it's rebuilt.
 # Only the VFS FSAL and NFSv4 are built (no NFSv3, NLM, RQUOTA, rpcbind, DBus, Kerberos).
 GANESHA_VERSION=V15.12
 GANESHA_COMMIT=f7a6811d936f776261bce0fd08570e214fe0b061
+GANESHA_BUILD="$GANESHA_VERSION-bridgebox-2"
 echo "==> Installing nfs-ganesha $GANESHA_VERSION"
 apk add userspace-rcu acl-libs libblkid libuuid libcap2
-if [ ! -x /usr/bin/ganesha.nfsd ]; then
+if [ ! -x /usr/bin/ganesha.nfsd ] || [ "$(cat /usr/lib/ganesha/bridgebox-build 2> /dev/null)" != "$GANESHA_BUILD" ]; then
     apk add --virtual .ganesha-build build-base cmake git bison flex linux-headers bsd-compat-headers \
         userspace-rcu-dev acl-dev util-linux-dev libcap-dev openssl-dev
     build=/tmp/ganesha-build
@@ -266,9 +273,137 @@ EOF
     grep -lE "$typedefs" "$src"/include/*.h | while read -r header; do
         sed -i -E "/$typedefs/d" "$header"
     done
+    patch --quiet --forward --ignore-whitespace -p1 -d "$build/nfs-ganesha" << 'EOF'
+diff --git a/src/FSAL/FSAL_VFS/namedattr.c b/src/FSAL/FSAL_VFS/namedattr.c
+index b92a125..00a2470 100644
+--- a/src/FSAL/FSAL_VFS/namedattr.c
++++ b/src/FSAL/FSAL_VFS/namedattr.c
+@@ -85,6 +85,7 @@
+ #include <pthread.h>
+ #include <string.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
+ #ifdef LINUX
+ #include <linux/limits.h> /* for XATTR_SIZE_MAX, XATTR_NAME_MAX */
+ #endif
+@@ -97,6 +98,7 @@
+ #include "vfs_methods.h"
+ #include "os/xattr.h"
+ #include "city.h"
++#include "gsh_config.h" /* nfs_param, for macOS_quirk_named_attr_mount_root */
+
+ /* Everything up to the #else at the end of this file uses Linux-only
+  * interfaces: listxattr() and llistxattr() on paths, /proc/self/fd, and
+@@ -1514,6 +1516,56 @@ bool vfs_is_attr_obj(const struct fsal_obj_handle *obj_hdl)
+ 	       obj_hdl->obj_ops == &named_attr_ops;
+ }
+
++#ifdef USE_MACOS_QUIRKS
++/**
++ * @brief Whether a directory is the top directory of a mounted file system
++ *
++ * macOS deadlocks when it mounts a file system it finds inside another
++ * one (a mirror mount): during the mount the Quarantine extension reads an
++ * extended attribute, and if the server says the directory has named
++ * attributes, the NFS client waits forever for a node that the mount keeps
++ * busy (nfs_mirror_mount_domount -> mac_vnop_getxattr ->
++ * nfs4_named_attr_get -> nfs_node_set_busy). Everything else that goes
++ * through the directory then hangs too. macOS_quirk_named_attr_mount_root in the NFSV4 block says
++ * that the top directory of a file system has none, so macOS answers
++ * ENOATTR without asking. Its own named attributes can still be set, but
++ * macOS neither reads nor lists them. It applies to every client, not per
++ * CLIENT block, because the attributes of an object are cached for all of
++ * them.
++ *
++ * @todo Remove once macOS is fixed.
++ *
++ * @param[in] fd    Object (any kind of fd), or its directory if path is set
++ * @param[in] path  Name in that directory, or NULL
++ *
++ * @return true if it is, false if it isn't or it can't be told.
++ */
++static bool is_mount_root(int fd, const char *path)
++{
++	char proc_path[PATH_MAX];
++	struct stat self, parent;
++	int len;
++
++	if (fd == AT_FDCWD)
++		len = snprintf(proc_path, sizeof(proc_path), "%s", path);
++	else if (path != NULL)
++		len = snprintf(proc_path, sizeof(proc_path),
++			       "/proc/self/fd/%d/%s", fd, path);
++	else
++		len = snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d",
++			       fd);
++
++	if (len < 0 || len + 3 >= sizeof(proc_path) ||
++	    stat(proc_path, &self) != 0)
++		return false;
++
++	/* ".." of the top directory is in the file system underneath */
++	memcpy(proc_path + len, "/..", 4);
++
++	return stat(proc_path, &parent) == 0 && parent.st_dev != self.st_dev;
++}
++#endif /* USE_MACOS_QUIRKS */
++
+ /* Entry points from the rest of VFS */
+
+ /**
+@@ -1533,6 +1585,16 @@ void vfs_get_named_attr(int fd, const char *path, struct fsal_attrlist *attrs)
+ 						      fso_named_attr))
+ 		return;
+
++#ifdef USE_MACOS_QUIRKS
++	if (attrs->type == DIRECTORY &&
++	    nfs_param.nfsv4_param.macos_quirk_named_attr_mount_root &&
++	    is_mount_root(fd, path)) {
++		attrs->named_attr = false;
++		FSAL_SET_MASK(attrs->valid_mask, ATTR4_NAMED_ATTR);
++		return;
++	}
++#endif /* USE_MACOS_QUIRKS */
++
+ 	/* Only files and directories have them */
+ 	if ((attrs->type == REGULAR_FILE || attrs->type == DIRECTORY) &&
+ 	    attr_any_at(fd, path, &any) != 0)
+diff --git a/src/include/gsh_config.h b/src/include/gsh_config.h
+index 371f036..b9d078d 100644
+--- a/src/include/gsh_config.h
++++ b/src/include/gsh_config.h
+@@ -720,6 +720,11 @@ typedef struct nfs_version4_parameter {
+ 	    macOS_quirk_pad_handles.
+ 	    @todo Remove once macOS is fixed. */
+ 	bool macos_quirk_pad_handles;
++	/** Report that the top directory of a file system has no named
++	    attributes, for every client. Settable with
++	    macOS_quirk_named_attr_mount_root.
++	    @todo Remove once macOS is fixed. */
++	bool macos_quirk_named_attr_mount_root;
+ #endif
+ 	/** Whether to allow delegations. Defaults to false and settable
+ 	    with Delegations */
+diff --git a/src/support/nfs_read_conf.c b/src/support/nfs_read_conf.c
+index 708c2ef..b0b9845 100644
+--- a/src/support/nfs_read_conf.c
++++ b/src/support/nfs_read_conf.c
+@@ -990,6 +990,10 @@ static struct config_item version4_params[] = {
+ 	/* @todo Remove once macOS is fixed. */
+ 	CONF_ITEM_BOOL("macOS_quirk_pad_handles", false, nfs_version4_parameter,
+ 		       macos_quirk_pad_handles),
++	/* @todo Remove once macOS is fixed. */
++	CONF_ITEM_BOOL("macOS_quirk_named_attr_mount_root", false,
++		       nfs_version4_parameter,
++		       macos_quirk_named_attr_mount_root),
+ #endif
+ 	CONF_ITEM_BOOL("Delegations", false, nfs_version4_parameter,
+ 		       allow_delegations),
+EOF
     check='strcmp(at + 1, owner_domain.domain.addr) != 0'
     sed -i "s|if ($check) {|if (0 \\&\\& $check) {|" "$src/idmapper/idmapper.c"
     if ! grep -qF "if (0 && $check) {" "$src/idmapper/idmapper.c" \
+            || ! grep -q macos_quirk_named_attr_mount_root "$src/FSAL/FSAL_VFS/namedattr.c" \
             || grep -qE "$typedefs" "$src"/include/*.h; then
         echo "ERROR: the sources of nfs-ganesha couldn't be changed" >&2
         exit 1
@@ -286,6 +421,7 @@ EOF
         -DUSE_FSAL_CEPH=OFF -DUSE_FSAL_GPFS=OFF -DUSE_FSAL_XFS=OFF -DUSE_FSAL_GLUSTER=OFF -DUSE_FSAL_NULL=OFF \
         -DUSE_FSAL_RGW=OFF -DUSE_FSAL_MEM=OFF -DUSE_FSAL_SAUNAFS=OFF -DUSE_FSAL_LIZARDFS=OFF \
         && make -j2 && make install)
+    echo "$GANESHA_BUILD" > /usr/lib/ganesha/bridgebox-build
     umount "$build"
     rmdir "$build"
     apk del .ganesha-build
@@ -314,6 +450,7 @@ NFSV4 {
 	Only_Numeric_Owners = true;
 	macOS_quirks_only_for_macOS_clients = false;
 	macOS_quirk_pad_handles = true;
+	macOS_quirk_named_attr_mount_root = true;
 }
 DIRECTORY_SERVICES {
 	DomainName = "bridgebox";

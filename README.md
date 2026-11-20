@@ -122,7 +122,9 @@ groups of the Mac to the VM, so that the names are translated into the ids of th
 
 The extended attributes of the Mac are stored as `user.` extended attributes of the files (e.g.
 `user.com.apple.FinderInfo`), so there are no AppleDouble `._` files. An extended attribute can be at most 64 KiB (the
-limit of Linux): a larger one (e.g. a big resource fork) can't be written.
+limit of Linux): a larger one (e.g. a big resource fork) can't be written. The top directory of each dataset and btrfs
+filesystem shows no extended attributes to the Mac (they can be written, but not read): macOS deadlocks when it mounts a
+nested dataset whose top directory has some.
 
 ### Checking and maintaining the disks
 

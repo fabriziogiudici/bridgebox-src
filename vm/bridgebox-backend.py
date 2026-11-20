@@ -422,6 +422,7 @@ def update_exports(excluded=()):
                       "\t}",
                       "\tCLIENT {",
                       f"\t\tClients = {host};",
+                      "\t\tProtocols = 4;",
                       "\t\tAccess_Type = RW;",
                       "\t\tmacOS_quirk_named_attr_NVERIFY = true;",
                       "\t\tmacOS_quirk_named_attr_truncate = true;",
