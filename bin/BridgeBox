@@ -166,11 +166,18 @@ send_mac_ids() {
         || warn "the NFS server doesn't know the users and groups of the Mac: owners can't be set"
 }
 
+# Sends to the back-end the prefixes of the names of the extended attributes that the Mac sees without "user." (the
+# others, e.g. user.it.tidalwave.x, keep it): for now only the ones of macOS.
+send_named_attrs() {
+    printf '%s\n' user.com.apple. | vm_ssh -o LogLevel=ERROR doas "$BACKEND" nfs named-attrs \
+        || warn "the NFS server may show the extended attributes of macOS with wrong names"
+}
+
 # Starts the sharing services given ('samba', 'nfs') in the VM.
 start_sharing() {
     local service
     for service in "$@"; do
-        [ "$service" != nfs ] || send_mac_ids
+        [ "$service" != nfs ] || { send_mac_ids; send_named_attrs; }
         vm_ssh -o LogLevel=ERROR doas "$BACKEND" "$service" start || warn "$service could not be started"
     done
 }
@@ -379,7 +386,7 @@ cmd_nfs() {
     [ $# -eq 1 ] && [[ "$1" =~ ^(start|stop|status)$ ]] \
         || die "usage: $(basename "$0") nfs {start | stop | status}"
     is_running || die "the VM is not running"
-    [ "$1" != start ] || send_mac_ids
+    [ "$1" != start ] || { send_mac_ids; send_named_attrs; }
     vm_ssh -o LogLevel=ERROR doas "$BACKEND" nfs "$1"
 }
 

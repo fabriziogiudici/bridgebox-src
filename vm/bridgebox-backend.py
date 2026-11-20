@@ -91,6 +91,7 @@ NFS_SERVICE = "bridgebox-nfs"                       # nfs-ganesha, NFSv4 only (w
 NFS_PORT = 2049
 AVAHI_NFS_SERVICES = "/etc/avahi/services/bridgebox-nfs-{}.service"   # announce the NFS exports with Bonjour
 NFS_IDS = "/run/bridgebox-nfs"                      # passwd and group of the Mac, for nfs-ganesha
+NFS_NAMED_ATTRS = "/etc/ganesha/bridgebox-named-attrs.conf"   # extended attributes shown to the Mac without "user."
 FORWARDED = ("zpool", "zfs", "btrfs")               # run as they are, with the given arguments
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
@@ -511,14 +512,46 @@ def nfs_ids():
     return 0
 
 
+def read_nfs_named_attrs():
+    """Returns the prefixes written by nfs_named_attrs() (or by scripts/provision.sh)."""
+    try:
+        with open(NFS_NAMED_ATTRS) as file:
+            return [line.strip() for line in file if line.strip() and not line.startswith("#")]
+    except OSError:
+        return []
+
+
+def nfs_named_attrs():
+    """Reads from the standard input the prefixes of the names of the extended attributes that the Mac sees without
+    "user." (one per line; bin/BridgeBox sends them), and writes them in NFS_NAMED_ATTRS, that nfs-ganesha reads when
+    it starts (named_attr_strip_user_prefixes, scripts/provision.sh): e.g. with user.com.apple., the extended attribute
+    user.com.apple.FinderInfo is com.apple.FinderInfo on the Mac, while user.it.tidalwave.x stays user.it.tidalwave.x.
+    Each prefix must start with "user." and have no spaces. Returns 1 if a prefix isn't valid, or none is received."""
+    prefixes = [line.strip() for line in sys.stdin if line.strip()]
+    invalid = [p for p in prefixes if not re.fullmatch(r"user\.\S+", p)]
+    if invalid or not prefixes:
+        error(f"invalid prefixes of extended attributes: {', '.join(invalid)}" if invalid
+              else "no prefix of extended attributes has been received")
+        return 1
+    with open(NFS_NAMED_ATTRS, "w") as file:
+        file.write("# Written by bridgebox-backend: the extended attributes whose names start with these prefixes are"
+                   " shown to the Mac\n# without \"user.\".\n" + "".join(f"{p}\n" for p in prefixes))
+    log(f"The Mac sees without \"user.\" the extended attributes {', '.join(p + '*' for p in prefixes)}"
+        + (" (from the next start of the NFS server)" if nfs_running() else ""))
+    return 0
+
+
 def nfs(action):
     """start: writes the exports, starts the NFS server (nfs-ganesha, NFSv4 only) and announces the exports with
     Bonjour; stop: stops it and removes the announcements (a Mac that has mounted an export loses it); status: shows
-    whether it runs, the exports, the connected clients and how many users and groups of the Mac are known (see
-    nfs_ids()). The server isn't started at boot: start lasts until the VM restarts. Returns 1 if something failed."""
+    whether it runs, the exports, the connected clients, how many users and groups of the Mac are known (see
+    nfs_ids()) and which extended attributes the Mac sees without "user." (see nfs_named_attrs()). The server isn't
+    started at boot: start lasts until the VM restarts. Returns 1 if something failed."""
     failures = 0
     if action == "ids":
         return nfs_ids()
+    if action == "named-attrs":
+        return nfs_named_attrs()
     if action == "start":
         update_exports()
         log("Starting the NFS server")
@@ -538,6 +571,8 @@ def nfs(action):
                 else "Exports: none")
             log(f"Clients: {', '.join(nfs_clients()) or 'none'}")
             log(f"Users and groups of the Mac known: {read_nfs_ids('passwd')} and {read_nfs_ids('group')}")
+            log("Extended attributes without \"user.\" on the Mac: "
+                + (", ".join(p + "*" for p in read_nfs_named_attrs()) or "none"))
     return 1 if failures else 0
 
 
@@ -1039,7 +1074,7 @@ def main():
     commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim, "scrub": scrub,
                 "samba": samba, "nfs": nfs, "speed-test": speed_test}
     valid = (["mount"], ["unmount"], ["samba", "start"], ["samba", "stop"], ["samba", "status"], ["nfs", "start"],
-             ["nfs", "stop"], ["nfs", "status"], ["nfs", "ids"], ["speed-test"],
+             ["nfs", "stop"], ["nfs", "status"], ["nfs", "ids"], ["nfs", "named-attrs"], ["speed-test"],
              ["speed-test", "--mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
     if command in FORWARDED:

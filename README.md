@@ -102,8 +102,9 @@ than as AppleDouble `._` files (only resource forks still use `._` files).
 ### Sharing with NFS
 
 The NFS server isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it (a
-Mac that has mounted an export loses it). `nfs status` shows whether the server runs, the exports, the connected clients
-and how many users and groups of the Mac are known.
+Mac that has mounted an export loses it). `nfs status` shows whether the server runs, the exports, the connected
+clients, how many users and groups of the Mac are known and which extended attributes the Mac sees without `user.` (see
+below).
 
 Each mounted dataset and btrfs filesystem is exported only to the Mac, read-write, with NFSv4 only. The paths start from
 the name of the pool or of the btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so
@@ -121,10 +122,15 @@ Mac sets the owner of a file, NFSv4 sends it as a name (e.g. `fritz@mistral.loca
 groups of the Mac to the VM, so that the names are translated into the ids of the Mac, whatever its domain.
 
 The extended attributes of the Mac are stored as `user.` extended attributes of the files (e.g.
-`user.com.apple.FinderInfo`), so there are no AppleDouble `._` files. An extended attribute can be at most 64 KiB (the
-limit of Linux): a larger one (e.g. a big resource fork) can't be written. The top directory of each dataset and btrfs
-filesystem shows no extended attributes to the Mac (they can be written, but not read): macOS deadlocks when it mounts a
-nested dataset whose top directory has some.
+`user.com.apple.FinderInfo`), so there are no AppleDouble `._` files. The names that already start with `user.` (e.g.
+`user.it.tidalwave.datamanager.id`, written by programs that use the same names as on Linux) are stored as they are,
+without a second `user.` (that ZFS refuses). Since the stored names don't say which of the two they were on the Mac,
+`user.` is removed, for the Mac, only from the attributes whose names start with one of the prefixes in
+`/etc/ganesha/bridgebox-named-attrs.conf` of the VM, which `nfs start` sends (for now only `user.com.apple.`): the
+others (e.g. `user.com.dropbox.attrs`, from `com.dropbox.attrs` on the Mac) are shown with `user.`. An extended
+attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't be written. The top
+directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be written, but not
+read): macOS deadlocks when it mounts a nested dataset whose top directory has some.
 
 ### Checking and maintaining the disks
 
