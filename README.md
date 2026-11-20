@@ -121,23 +121,25 @@ the workarounds for the NFS client of macOS), since the NFS server of the Linux 
 attributes of the Mac: over NFSv4.0, macOS sends them as named attributes, which nfs-ganesha supports, storing each one
 as a `user.` extended attribute of the file (e.g. `user.com.apple.FinderInfo`), so there are no AppleDouble `._` files.
 An extended attribute can be at most 64 KiB (the limit of Linux): a larger one (e.g. a big resource fork) can't be
-written. The NFS server isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops
-it. It serves only NFSv4, on TCP port 2049, without grace period. Each mounted dataset and btrfs filesystem is exported
-only to the Mac (the gateway of the NAT network of the VM), read-write, with the user and group ids of the Mac: unlike
-with Samba, files belong to the users of the Mac, as on its disks (e.g. a clone made on the Mac), and the ones created
-from the Mac belong to the user who creates them. Root on the Mac is root in the VM too (`No_Root_Squash`), so that
-backup tools that run as root, such as Carbon Copy Cloner, can write everywhere. When the Mac sets the owner of a file,
-NFSv4 sends it as a name (e.g. `fritz@mistral.local`): `nfs start` sends the users and groups of the Mac to the VM (with
-`dscl`), and nfs-ganesha translates the names with them, whatever the domain of the Mac, in a mount namespace of its own
-where they replace `/etc/passwd` and `/etc/group`, so that they don't clash with the ones of the VM (e.g. `staff` is 20
-on the Mac). While the server runs, the export of each pool and btrfs filesystem is announced with Bonjour (`_nfs._tcp`,
-as `<name> on bridgebox`). The Mac mounts NFSv3 by default, so it must be told to use NFSv4.0 (the only NFSv4 version it
-supports) and named attributes: e.g. `mount -t nfs -o vers=4.0,namedattr bridgebox.local:/Clone2 <directory>`, or, for
-the Finder (Go > Connect to Server with `nfs://bridgebox.local/Clone2`), the line `nfs.client.mount.options =
-vers=4.0,namedattr` in `/etc/nfs.conf` of the Mac (which applies to all its NFS mounts). The paths start from the name
-of the pool or of the btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so that
-it's reachable from it, or can be mounted by itself (e.g. `bridgebox.local:/Clone2/Music`). `nfs status` shows whether
-the server runs, the exports, the connected clients and how many users and groups of the Mac are known.
+written. The top directory of each dataset and btrfs filesystem shows no extended attributes to the Mac (they can be
+written, but not read): macOS deadlocks when it mounts a nested dataset whose top directory has some. The NFS server
+isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it. It serves only
+NFSv4, on TCP port 2049, without grace period. Each mounted dataset and btrfs filesystem is exported only to the Mac
+(the gateway of the NAT network of the VM), read-write, with the user and group ids of the Mac: unlike with Samba, files
+belong to the users of the Mac, as on its disks (e.g. a clone made on the Mac), and the ones created from the Mac belong
+to the user who creates them. Root on the Mac is root in the VM too (`No_Root_Squash`), so that backup tools that run as
+root, such as Carbon Copy Cloner, can write everywhere. When the Mac sets the owner of a file, NFSv4 sends it as a name
+(e.g. `fritz@mistral.local`): `nfs start` sends the users and groups of the Mac to the VM (with `dscl`), and nfs-ganesha
+translates the names with them, whatever the domain of the Mac, in a mount namespace of its own where they replace
+`/etc/passwd` and `/etc/group`, so that they don't clash with the ones of the VM (e.g. `staff` is 20 on the Mac). While
+the server runs, the export of each pool and btrfs filesystem is announced with Bonjour (`_nfs._tcp`, as `<name> on
+bridgebox`). The Mac mounts NFSv3 by default, so it must be told to use NFSv4.0 (the only NFSv4 version it supports) and
+named attributes: e.g. `mount -t nfs -o vers=4.0,namedattr bridgebox.local:/Clone2 <directory>`, or, for the Finder
+(Go > Connect to Server with `nfs://bridgebox.local/Clone2`), the line `nfs.client.mount.options = vers=4.0,namedattr`
+in `/etc/nfs.conf` of the Mac (which applies to all its NFS mounts). The paths start from the name of the pool or of the
+btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so that it's reachable from it,
+or can be mounted by itself (e.g. `bridgebox.local:/Clone2/Music`). `nfs status` shows whether the server runs, the
+exports, the connected clients and how many users and groups of the Mac are known.
 
 When Samba runs, each mounted pool is shared with SMB as a share with the name of the pool (e.g.
 `smb://bridgebox.local/Clone2`), and each btrfs filesystem as a share with the name of its mount point, so that the Mac
