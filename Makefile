@@ -33,7 +33,7 @@ image:
 
 # Partitions to pass to the VM, e.g. make start DISKS="disk10s2 disk8s2"
 DISKS ?=
-# Sharing services to start, e.g. make start SHARING="--samba"
+# Sharing services to start, e.g. make start SHARING="--samba --nfs"
 SHARING ?=
 
 start: image
