@@ -123,6 +123,8 @@ verify() {
         && doas rc-service avahi-daemon status'
     "$BRIDGEBOX" ssh "doas $BACKEND unmount && echo 'the back-end runs'"
     "$BRIDGEBOX" ssh "doas $BACKEND samba start && doas rc-service samba status && doas $BACKEND samba stop"
+    "$BRIDGEBOX" ssh "doas $BACKEND nfs start && doas rc-service bridgebox-nfs status \
+        && pidof ganesha.nfsd > /dev/null && echo 'nfs-ganesha runs' && doas $BACKEND nfs stop"
     shutdown_vm
 }
 

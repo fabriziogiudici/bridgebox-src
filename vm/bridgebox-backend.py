@@ -41,6 +41,12 @@ ssh by the BridgeBox command on the Mac.
                                  shows whether it runs, with the connected clients and the open files
     bridgebox-backend {zpool | zfs | btrfs} [argument...]
                                  runs zpool, zfs or btrfs with the given arguments, as they are
+    bridgebox-backend nfs {start | stop | status}
+                                 starts or stops the NFSv4 server (it isn't started at boot), or shows whether it
+                                 runs, with the exports and the clients
+    bridgebox-backend nfs ids    reads from the standard input the users and groups of the Mac, with which the NFS
+                                 server translates the owners that the Mac sends by name ('BridgeBox nfs start' sends
+                                 them)
     bridgebox-backend speed-test [--mixed]
                                  measures with fio the speed of each mounted pool and btrfs filesystem, in turn:
                                  sequential writes as a copy does them, then sequential reads; with '--mixed', reads and
@@ -63,19 +69,28 @@ used. A filesystem with missing devices isn't mounted.
 """
 
 import errno
+import glob
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import zlib
+from xml.sax.saxutils import escape
 
 MOUNT_ROOT = "/srv/bridgebox"
 SHARES_CONF = "/etc/samba/bridgebox-shares.conf"   # included by smb.conf
 AVAHI_SMB_SERVICE = "/etc/avahi/services/smb.service"   # announces the shares with Bonjour
+NFS_EXPORTS = "/etc/ganesha/bridgebox-exports.conf"   # included by ganesha.conf (scripts/provision.sh)
+NFS_SERVICE = "bridgebox-nfs"                       # nfs-ganesha, NFSv4 only (written by scripts/provision.sh)
+NFS_PORT = 2049
+AVAHI_NFS_SERVICES = "/etc/avahi/services/bridgebox-nfs-{}.service"   # announce the NFS exports with Bonjour
+NFS_IDS = "/run/bridgebox-nfs"                      # passwd and group of the Mac, for nfs-ganesha
 FORWARDED = ("zpool", "zfs", "btrfs")               # run as they are, with the given arguments
 PASSPHRASE_ATTEMPTS = 3
 SYS_BLOCK = "/sys/class/block"                      # the block devices of the VM, including the device-mapper ones
@@ -270,12 +285,259 @@ def update_shares(excluded=()):
         shared.append(name)
     with open(SHARES_CONF, "w") as file:
         file.write("\n".join(lines))
+    update_exports(excluded)
     # If Samba has been stopped ('samba stop'), it reads the configuration when it's started again.
     if smbd_running():
         result = subprocess.run(["smbcontrol", "smbd", "reload-config"], capture_output=True, text=True)
         if result.returncode != 0:
             warn(f"Samba didn't reload its configuration: {(result.stderr or result.stdout).strip()}")
     return shared
+
+
+def host_address():
+    """Returns the IP address of the Mac as the VM sees it, that is the gateway of the NAT network of Virtualization
+    framework; None if there's no default route."""
+    match = re.search(r"^default via (\S+)", output("ip", "route", "show", "default"), re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def nfs_running():
+    return subprocess.run(["rc-service", NFS_SERVICE, "status"], capture_output=True).returncode == 0
+
+
+def nfs_path(point):
+    """Returns the path with which the Mac reaches a mount point with NFSv4: the Pseudo path of its export in
+    nfs-ganesha, relative to MOUNT_ROOT, so /srv/bridgebox/MyVolume is /MyVolume."""
+    return "/" + os.path.relpath(point, MOUNT_ROOT)
+
+
+def nfs_roots(excluded=()):
+    """Returns (name, NFSv4 path) of the exports through which the Mac reaches the volumes: the root dataset of each
+    imported pool whose root dataset is mounted, and each btrfs filesystem mounted under MOUNT_ROOT, except the
+    excluded ones. The child datasets are reachable from them (they are exports nested in them)."""
+    roots = []
+    for pool in imported_pools():
+        if pool in excluded:
+            continue
+        root = next((d for d in datasets(pool, "mountpoint", "mounted") if d["name"] == pool), None)
+        if root is not None and root["mounted"] == "yes":
+            roots.append((pool, nfs_path(root["mountpoint"])))
+    roots += [(os.path.basename(point), nfs_path(point)) for point in btrfs_mounts()
+              if os.path.basename(point) not in excluded]
+    return roots
+
+
+def update_nfs_announcements(roots):
+    """Announces with Bonjour (_nfs._tcp, with the path in the TXT record) each of the given exports, as
+    '<name> on <host>', and removes the announcements of the other ones; has Avahi read them again if something
+    changed."""
+    host = socket.gethostname()
+    wanted = {}
+    for name, path in roots:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+        wanted[AVAHI_NFS_SERVICES.format(safe)] = f"""<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Written by bridgebox-backend while the NFS server runs. -->
+<service-group>
+  <name>{escape(f"{name} on {host}")}</name>
+  <service>
+    <type>_nfs._tcp</type>
+    <port>2049</port>
+    <txt-record>path={escape(path)}</txt-record>
+  </service>
+</service-group>
+"""
+    changed = False
+    for file in glob.glob(AVAHI_NFS_SERVICES.format("*")):
+        if file not in wanted:
+            os.remove(file)
+            changed = True
+    for file, content in wanted.items():
+        if not os.path.exists(file) or open(file).read() != content:
+            with open(file, "w") as stream:
+                stream.write(content)
+            changed = True
+    if changed:
+        result = subprocess.run(["avahi-daemon", "--reload"], capture_output=True, text=True)
+        if result.returncode != 0:
+            warn(f"Avahi didn't read the announcements again: {(result.stderr or result.stdout).strip()}")
+
+
+def export_id(path, taken):
+    """Returns the Export_Id of nfs-ganesha for a path, between 1 and 65534 (0 is the pseudo root), from its CRC32, so
+    that it stays the same when the exports are written again; the next free one if it's taken."""
+    number = zlib.crc32(path.encode()) % 65534 + 1
+    while number in taken:
+        number = number % 65534 + 1
+    taken.add(number)
+    return number
+
+
+def nfs_pid():
+    """Returns the pid of nfs-ganesha, or None if it doesn't run."""
+    try:
+        pid = int(open("/run/ganesha.pid").read())
+        return pid if os.path.isdir(f"/proc/{pid}") else None
+    except (OSError, ValueError):
+        return None
+
+
+def update_exports(excluded=()):
+    """Writes in NFS_EXPORTS an export of nfs-ganesha for each mounted dataset of the imported pools and for each btrfs
+    filesystem mounted under MOUNT_ROOT, except the excluded ones (by the name of the pool or of the filesystem), and
+    has nfs-ganesha read them again (SIGHUP) if it runs. They are only for the Mac, read-write, NFSv4 over TCP, with
+    the user and group ids that the Mac sends: the files belong to the users of the Mac, as on its disks (e.g. a
+    clone), and the ones created from the Mac belong to the user who creates them. Root on the Mac is root here too
+    (No_Root_Squash): backup tools such as Carbon Copy Cloner run as root, and must be able to write everywhere; the
+    exports are only for the Mac, where root can read the disks anyway. Each one is reached by the Mac with the path
+    returned by nfs_path(): those of the child datasets are nested in the one of their pool. The workarounds of
+    nfs-ganesha for macOS (named attributes, mounted_on_fileid) are enabled for the Mac: the extended attributes are
+    NFSv4 named attributes, stored as user.* extended attributes (VFS named_attr in ganesha.conf)."""
+    pools = [pool for pool in imported_pools() if pool not in excluded]
+    points = [point for point in btrfs_mounts() if os.path.basename(point) not in excluded]
+    lines = ["# Written by bridgebox-backend: one export for each mounted filesystem, only for the Mac."]
+    host = host_address()
+    if host is None:
+        warn("the address of the Mac isn't known (the VM has no default route): nothing is exported with NFS")
+    else:
+        paths = [dataset["mountpoint"] for pool in pools for dataset in datasets(pool, "mountpoint", "mounted")
+                 if dataset["mounted"] == "yes"] + points
+        taken = set()
+        for path in paths:
+            if '"' in path or "\n" in path:
+                warn(f"{path} isn't exported with NFS: its name can't be written in the configuration of nfs-ganesha")
+                continue
+            lines += ["",
+                      "EXPORT {",
+                      f"\tExport_Id = {export_id(path, taken)};",
+                      f'\tPath = "{path}";',
+                      f'\tPseudo = "{nfs_path(path)}";',
+                      "\tProtocols = 4;",
+                      "\tTransports = TCP;",
+                      "\tSecType = sys;",
+                      "\tSquash = No_Root_Squash;",
+                      "\tAccess_Type = None;",
+                      "\tFSAL {",
+                      "\t\tName = VFS;",
+                      "\t}",
+                      "\tCLIENT {",
+                      f"\t\tClients = {host};",
+                      "\t\tAccess_Type = RW;",
+                      "\t\tmacOS_quirk_named_attr_NVERIFY = true;",
+                      "\t\tmacOS_quirk_named_attr_truncate = true;",
+                      "\t\tmacOS_quirk_mounted_on_fileid = true;",
+                      "\t}",
+                      "}"]
+    os.makedirs(os.path.dirname(NFS_EXPORTS), exist_ok=True)
+    with open(NFS_EXPORTS, "w") as file:
+        file.write("\n".join(lines) + "\n")
+    # If the NFS server isn't running, it reads the exports when it's started; it's announced only while it runs.
+    running = nfs_running()
+    pid = nfs_pid() if running else None
+    if pid is not None:
+        os.kill(pid, signal.SIGHUP)
+    update_nfs_announcements(nfs_roots(excluded) if running and host is not None else [])
+
+
+def nfs_exports():
+    """Returns (Pseudo path, path) of the exports written by update_exports()."""
+    try:
+        text = open(NFS_EXPORTS).read()
+    except OSError:
+        return []
+    return re.findall(r'^\tPath = "([^"]*)";\n\tPseudo = "([^"]*)";', text, re.MULTILINE)
+
+
+def nfs_clients():
+    """Returns the addresses of the clients connected to the NFS server (TCP connections to NFS_PORT)."""
+    addresses = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = open(table).read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            local, remote, state = fields[1], fields[2], fields[3]
+            if state != "01" or int(local.rsplit(":", 1)[1], 16) != NFS_PORT:
+                continue
+            address, port = remote.rsplit(":", 1)
+            if len(address) == 8:
+                address = socket.inet_ntop(socket.AF_INET, bytes.fromhex(address)[::-1])
+            else:
+                raw = bytes.fromhex(address)
+                address = socket.inet_ntop(socket.AF_INET6, b"".join(raw[k:k + 4][::-1] for k in range(0, 16, 4)))
+            addresses.append(f"{address}:{int(port, 16)}")
+    return addresses
+
+
+def read_nfs_ids(kind):
+    """Returns the number of the users or of the groups of the Mac (kind: 'passwd' or 'group') written by nfs_ids()."""
+    try:
+        with open(os.path.join(NFS_IDS, kind)) as file:
+            return sum(1 for line in file if line.strip())
+    except OSError:
+        return 0
+
+
+def nfs_ids():
+    """Reads from the standard input the users and groups of the Mac, as lines 'user <name> <id>' and
+    'group <name> <id>' (bin/BridgeBox sends them, from dscl), and writes them in NFS_IDS as passwd and group:
+    nfs-ganesha sees them as /etc/passwd and /etc/group (the bridgebox-nfs service binds them in its own mount
+    namespace, scripts/provision.sh), and translates with them the owners that the Mac sends by name (e.g.
+    fritz@mistral.local, when a copy keeps the owners). The files are rewritten in place, since nfs-ganesha sees them
+    through bind mounts. Ids that aren't valid on Linux (e.g. -2, nobody on the Mac) are skipped; the user and the
+    group nobody are added as 65534. Returns 1 if nothing has been received."""
+    ids = {"user": {}, "group": {}}
+    for line in sys.stdin:
+        fields = line.split()
+        if (len(fields) == 3 and fields[0] in ids and fields[2].isdigit() and int(fields[2]) < 2 ** 32 - 2
+                and re.fullmatch(r"[^:@\s]+", fields[1])):
+            ids[fields[0]][fields[1]] = int(fields[2])
+    if not ids["user"] or not ids["group"]:
+        error("the users and groups of the Mac haven't been received")
+        return 1
+    ids["user"].setdefault("nobody", 65534)
+    ids["group"].setdefault("nobody", 65534)
+    os.makedirs(NFS_IDS, exist_ok=True)
+    with open(os.path.join(NFS_IDS, "passwd"), "w") as file:
+        file.writelines(f"{name}:x:{uid}:65534::/var/empty:/sbin/nologin\n"
+                        for name, uid in sorted(ids["user"].items()))
+    with open(os.path.join(NFS_IDS, "group"), "w") as file:
+        file.writelines(f"{name}:x:{gid}:\n" for name, gid in sorted(ids["group"].items()))
+    log(f"The NFS server translates the owners with the {len(ids['user'])} users and {len(ids['group'])} groups of "
+        "the Mac")
+    return 0
+
+
+def nfs(action):
+    """start: writes the exports, starts the NFS server (nfs-ganesha, NFSv4 only) and announces the exports with
+    Bonjour; stop: stops it and removes the announcements (a Mac that has mounted an export loses it); status: shows
+    whether it runs, the exports, the connected clients and how many users and groups of the Mac are known (see
+    nfs_ids()). The server isn't started at boot: start lasts until the VM restarts. Returns 1 if something failed."""
+    failures = 0
+    if action == "ids":
+        return nfs_ids()
+    if action == "start":
+        update_exports()
+        log("Starting the NFS server")
+        failures += subprocess.run(["rc-service", NFS_SERVICE, "start"]).returncode != 0
+        update_exports()            # now that it runs, also announces the exports with Bonjour
+        report_sharing([])
+    elif action == "stop":
+        log("Stopping the NFS server")
+        failures += subprocess.run(["rc-service", NFS_SERVICE, "stop"]).returncode != 0
+        update_nfs_announcements([])
+    else:
+        running = nfs_running() and nfs_pid() is not None
+        log(f"The NFS server is {'running' if running else 'stopped'}; the Mac is {host_address() or 'unknown'}")
+        if running:
+            exports = nfs_exports()
+            log("Exports:" + "".join(f"\n    {pseudo}  ({path})" for path, pseudo in exports) if exports
+                else "Exports: none")
+            log(f"Clients: {', '.join(nfs_clients()) or 'none'}")
+            log(f"Users and groups of the Mac known: {read_nfs_ids('passwd')} and {read_nfs_ids('group')}")
+    return 1 if failures else 0
 
 
 def mounted_volumes():
@@ -660,14 +922,21 @@ def scrub(action, wait, target):
 
 
 def report_sharing(shares):
-    """Logs how the mounted volumes are shared: the Samba shares are written also when Samba is stopped, so that they
-    are ready when it's started."""
+    """Logs how the mounted volumes are shared: the Samba shares and the NFS exports are written also when the
+    services are stopped, so that they are ready when they are started. With no shares given, only NFS is reported."""
     host = socket.gethostname()
     if shares and smbd_running():
         for name in shares:
             log(f"Shared {name} with SMB as smb://{host}.local/{name}")
     elif shares:
         log(f"Samba is stopped: {', '.join(shares)} will be shared with SMB when it's started ('samba start')")
+    roots = nfs_roots()
+    if roots and nfs_running():
+        for name, path in roots:
+            log(f"Exported {name} with NFSv4 as {host}.local:{path}")
+    elif roots and shares:
+        log(f"The NFS server is stopped: {', '.join(name for name, _ in roots)} will be exported when it's started "
+            "('nfs start')")
 
 
 def smbd_running():
@@ -767,8 +1036,9 @@ def parse_start_stop(args):
 
 def main():
     commands = {"mount": mount, "unmount": unmount, "disk-status": disk_status, "trim": trim, "scrub": scrub,
-                "samba": samba, "speed-test": speed_test}
-    valid = (["mount"], ["unmount"], ["samba", "start"], ["samba", "stop"], ["samba", "status"], ["speed-test"],
+                "samba": samba, "nfs": nfs, "speed-test": speed_test}
+    valid = (["mount"], ["unmount"], ["samba", "start"], ["samba", "stop"], ["samba", "status"], ["nfs", "start"],
+             ["nfs", "stop"], ["nfs", "status"], ["nfs", "ids"], ["speed-test"],
              ["speed-test", "--mixed"])
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
     if command in FORWARDED:
@@ -782,7 +1052,9 @@ def main():
     if args is None:
         print(f"Usage: {os.path.basename(sys.argv[0])} {{mount | unmount | disk-status [name]"
               " | trim {start [--wait] | stop} [name] | scrub {start [--wait] | stop} [name]"
-              " | samba {start | stop | status} | speed-test [--mixed] | {zpool | zfs | btrfs} [argument...]}",
+              " | samba {start | stop | status} | nfs {start | stop | status}"
+              " | speed-test [--mixed]"
+              " | {zpool | zfs | btrfs} [argument...]}",
               file=sys.stderr)
         return 1
     if os.geteuid() != 0:

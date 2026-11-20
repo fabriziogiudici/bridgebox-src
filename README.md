@@ -2,7 +2,7 @@
 
 BridgeBox gives macOS access to disks with Linux filesystems (btrfs, ZFS) without kernel extensions or FUSE. A small
 Alpine Linux VM, run by [vfkit](https://github.com/crc-org/vfkit) on Apple's Virtualization.framework, will own the disk
-and expose it to the Mac only, through SMB.
+and expose it to the Mac only, through SMB and NFS.
 
 
 ## Requirements
@@ -36,11 +36,12 @@ Everything is done with the `BridgeBox` command (from the sources, `bin/BridgeBo
 [Development](#development)):
 
 ```shell
-BridgeBox start [--samba] [disk...]            # starts the VM, mounts the disks and starts the sharing services
+BridgeBox start [--samba] [--nfs] [disk...]    # starts the VM, mounts the disks and starts the sharing services
 BridgeBox stop                                 # unmounts the disks and stops the VM
 BridgeBox status                               # state of the VM
 BridgeBox ip                                   # IP address of the VM
 BridgeBox samba {start | stop | status}        # shares the disks with SMB
+BridgeBox nfs {start | stop | status}          # shares the disks with NFS
 BridgeBox disk-status [name]                   # state of the pools and filesystems
 BridgeBox trim {start [--wait] | stop} [name]  # TRIM of the pools and filesystems
 BridgeBox scrub {start [--wait] | stop} [name] # scrub of the pools and filesystems
@@ -59,7 +60,8 @@ in `/tmp/bridgebox-<uid>/`.
 their partitions, as `diskutil list` shows them, e.g. `BridgeBox start disk10s2 disk8s2`. A partition must not be
 mounted by macOS (unmount it with `diskutil unmount`); if the user can't access it, `sudo` asks for the password to give
 it to the user. Disks can't be added to a running VM: `start` with a running VM only starts the sharing services, and
-the VM must be stopped first. `--samba` starts Samba, which can also be started later with `samba start`.
+the VM must be stopped first. `--samba` and `--nfs` start Samba and the NFS server, which can also be started later with
+`samba start` and `nfs start`.
 
 The VM first opens the LUKS volumes found on the partitions, asking for their passphrases (three attempts); then it
 imports all the ZFS pools found on the partitions and in the LUKS volumes, asks for the passphrase of each encryption
@@ -96,6 +98,31 @@ Bonjour, so `bridgebox` appears in the sidebar of the Finder; otherwise use Go >
 `smb://bridgebox.local` and connect as guest. NetBIOS is disabled. Samba uses `vfs_fruit` and `streams_xattr`, so macOS
 metadata (Finder info, tags, extended attributes) are stored as extended attributes of the files on ZFS or btrfs rather
 than as AppleDouble `._` files (only resource forks still use `._` files).
+
+### Sharing with NFS
+
+The NFS server isn't started at boot either: `nfs start` starts it, until the VM restarts, and `nfs stop` stops it (a
+Mac that has mounted an export loses it). `nfs status` shows whether the server runs, the exports, the connected clients
+and how many users and groups of the Mac are known.
+
+Each mounted dataset and btrfs filesystem is exported only to the Mac, read-write, with NFSv4 only. The paths start from
+the name of the pool or of the btrfs filesystem; each dataset is an export of its own, nested in the one of its pool, so
+that it's reachable from it, or can be mounted by itself (e.g. `bridgebox.local:/MyVolume/Music`). While the server
+runs, the export of each pool and btrfs filesystem is announced with Bonjour (`_nfs._tcp`, as `<name> on bridgebox`).
+The Mac mounts NFSv3 by default, so it must be told to use NFSv4.0 (the only NFSv4 version it supports) and named
+attributes: e.g. `mount -t nfs -o vers=4.0,namedattr bridgebox.local:/MyVolume <directory>`, or, for the Finder
+(Go > Connect to Server with `nfs://bridgebox.local/MyVolume`), the line `nfs.client.mount.options = vers=4.0,namedattr`
+in `/etc/nfs.conf` of the Mac (which applies to all its NFS mounts).
+
+Files keep the user and group ids of the Mac: unlike with Samba, they belong to the users of the Mac, as on its disks
+(e.g. a clone made on the Mac), and the ones created from the Mac belong to the user who creates them. Root on the Mac
+is root in the VM too, so that backup tools that run as root, such as Carbon Copy Cloner, can write everywhere. When the
+Mac sets the owner of a file, NFSv4 sends it as a name (e.g. `fritz@mistral.local`): `nfs start` sends the users and
+groups of the Mac to the VM, so that the names are translated into the ids of the Mac, whatever its domain.
+
+The extended attributes of the Mac are stored as `user.` extended attributes of the files (e.g.
+`user.com.apple.FinderInfo`), so there are no AppleDouble `._` files. An extended attribute can be at most 64 KiB (the
+limit of Linux): a larger one (e.g. a big resource fork) can't be written.
 
 ### Checking and maintaining the disks
 
@@ -150,7 +177,7 @@ in pipes and scripts the output is the plain one (e.g. `BridgeBox zfs list -H -o
 make image    # downloads Alpine 3.24.4 (cached in cache/), prepares the VM in target/vm, installs btrfs and ZFS
 make start    # starts the VM in background and waits for ssh; DISKS="disk10s2 ..." passes partitions to the VM,
               # whose ZFS pools and btrfs filesystems, also in LUKS volumes, are mounted under /srv/bridgebox (the
-              # passphrases are asked for); SHARING="--samba" starts Samba
+              # passphrases are asked for); SHARING="--samba --nfs" starts Samba and the NFS server
 make ssh      # logs in as the 'bridgebox' user
 make status   # VM state as reported by vfkit
 make ip       # IP address of the VM
@@ -161,12 +188,12 @@ make clean    # stops and deletes the VM (the Alpine image is kept; 'make distcl
 ```
 
 `make image` runs `scripts/prepare-vm.sh`, which boots the VM once to create the user `bridgebox` and install
-`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi and
-Samba, with `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed VM to check
-that it runs from a read-only disk, that the kernel modules load, that Samba can be started and stopped and that the Mac
-can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image` resumes from the step that
-failed. The other targets run `bin/BridgeBox`, which can also be invoked directly, with all the commands of
-[Usage](#usage). Settings shared by the two scripts are in `scripts/config.sh`.
+`btrfs-progs`, `zfs` and `zfs-virt` (the ZFS kernel modules for the `virt` kernel of the Alpine cloud images), Avahi,
+Samba and nfs-ganesha, with `scripts/provision.sh`, and seals the image with `scripts/seal.sh`; then it boots the sealed
+VM to check that it runs from a read-only disk, that the kernel modules load, that Samba and nfs-ganesha can be started
+and stopped and that the Mac can resolve the VM with Bonjour. This step needs internet access; if it fails, `make image`
+resumes from the step that failed. The other targets run `bin/BridgeBox`, which can also be invoked directly, with all
+the commands of [Usage](#usage). Settings shared by the two scripts are in `scripts/config.sh`.
 
 Settings can be overridden on the command line, e.g. `make start MEMORY_MB=2048`; see the top of the `Makefile`. The
 disk is used as it comes in the Alpine image, without resizing.
@@ -192,6 +219,14 @@ work too; the top-level subvolume is mounted (`subvolid=5`), with the default op
 back-end stop sharing, unmount the btrfs filesystems, export the pools and close the LUKS volumes that it opened first,
 and doesn't power off the VM if that fails; otherwise the VM gets a Stop request first, and a HardStop if the guest
 doesn't react.
+
+The NFS server is nfs-ganesha (`ganesha.nfsd`), built from its sources by `scripts/provision.sh` (version V15.12, with
+the workarounds for the NFS client of macOS and a few changes of BridgeBox, described there), since the NFS server of
+the Linux kernel can't store the extended attributes of the Mac: over NFSv4.0, macOS sends them as named attributes,
+which nfs-ganesha supports. It serves only NFSv4, on TCP port 2049, without grace period, to the gateway of the NAT
+network of the VM, which is the Mac, with `No_Root_Squash`. The users and groups of the Mac (read with `dscl` by `nfs
+start`) are used by nfs-ganesha in a mount namespace of its own, where they replace `/etc/passwd` and `/etc/group`, so
+that they don't clash with the ones of the VM (e.g. `staff` is 20 on the Mac).
 
 Files in `target/vm`:
 
